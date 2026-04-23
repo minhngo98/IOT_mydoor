@@ -1,0 +1,15 @@
+.pio
+.vscode/
+.DS_Store
+*.bin
+*.elf
+*.hex
+*.a
+*.map
+build/
+lib/*/examples/
+test/
+*~
+*.swp
+.env
+.env.*

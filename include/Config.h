@@ -1,0 +1,74 @@
+#ifndef CONFIG_H
+#define CONFIG_H
+
+// ==========================================
+// 1. BLYNK IOT CONFIGURATION (LẤY TỪ WEB BLYNK CONSOLE)
+// ==========================================
+#ifdef USE_BLYNK
+  #define VPIN_DOOR_UP    V0  // Nút MỞ (Button)
+  #define VPIN_DOOR_DOWN  V1  // Nút ĐÓNG (Button)
+  #define VPIN_DOOR_STOP  V2  // Nút DỪNG (Button)
+  #define VPIN_POWER_BOX  V3  // Công tắc Nguồn Tổng (Switch)
+  #define VPIN_TERMINAL   V4  // Terminal hiển thị Log sự kiện
+#endif
+
+// ==========================================
+// 2. PIN DEFINITIONS (DỰA THEO SƠ ĐỒ ĐÃ CHỐT)
+// ==========================================
+// Relay Điều khiển Cửa (Opto-isolated, Active LOW)
+#define PIN_RELAY_UP    25  // IN1: Kéo LÊN
+#define PIN_RELAY_DOWN  26  // IN2: Kéo XUỐNG
+#define PIN_RELAY_STOP  27  // IN3: DỪNG
+
+// Relay 4: Cấp/Ngắt Nguồn Tổng Box Cửa Cuốn
+#define PIN_RELAY_POWER 32  // IN4: Điều khiển nguồn box điều khiển (Bật ban ngày, Tắt ban đêm)
+
+// Đèn LED Trạng thái (Active LOW: Sáng khi kéo xuống GND)
+#define PIN_LED_WIFI    13  // BLUE: Trạng thái WiFi/Cloud
+#define PIN_LED_READY   14  // GREEN: Hệ thống sẵn sàng
+#define PIN_LED_FAULT   4   // RED: Lỗi hệ thống
+#define PIN_LED_WARN    16  // YELLOW: Cảnh báo
+
+// Nút nhấn vật lý
+#define PIN_BTN_CONFIG  0   // Nút BOOT: Nhấn giữ để vào Web Config / Wake-up AP
+
+// ==========================================
+// 3. LOGIC STATES (CỰC KỲ QUAN TRỌNG ĐỂ KHÔNG CHẠP CHÁY)
+// ==========================================
+// Mạch Relay Opto kích mức thấp
+#define RELAY_ON  LOW
+#define RELAY_OFF HIGH
+
+// Mạch Relay 4 cắt nguồn (kích mức thấp)
+#define POWER_ON  LOW
+#define POWER_OFF HIGH
+
+// LED Active LOW
+#define LED_ON    LOW
+#define LED_OFF   HIGH
+
+// ==========================================
+// 4. THÔNG SỐ VẬN HÀNH & KIẾN TRÚC DUAL-CORE
+// ==========================================
+#define DOOR_PULSE_MS      500    // Thời gian "nhấn giữ" nút âm tường ảo (ms)
+#define WIFI_TIMEOUT_MS    10000  // 10s: Thời gian chờ kết nối WiFi
+
+// Watchdog Timer (WDT)
+#define WDT_TIMEOUT_SEC    8      // Hardware WDT Timeout (8 giây)
+
+// Cấu hình Task FreeRTOS (Priority: Control > Network)
+#define TASK_NETWORK_PRIORITY 1   // Ưu tiên thấp hơn cho Core 0 (Network)
+#define TASK_CONTROL_PRIORITY 2   // Ưu tiên cao hơn cho Core 1 (Control)
+#define TASK_NETWORK_CORE     0   // PRO_CPU
+#define TASK_CONTROL_CORE     1   // APP_CPU
+
+// Chế độ Rescue AP (Hidden SSID)
+#define AP_CYCLE_ON_MS     600000 // 10 phút Bật AP (ms)
+#define AP_CYCLE_OFF_MS    300000 // 5 phút Tắt AP (ms)
+#define AP_LOCKOUT_MS      1800000// 30 phút khóa AP nếu nhập sai 5 lần (ms)
+
+// Cảnh báo & Tự phục hồi
+#define MIN_FREE_HEAP      20000  // Ngưỡng RAM nguy hiểm (20KB), dưới mức này tự Reboot
+#define DAILY_REBOOT_HOUR  3      // Tự động Reboot lúc 03:00 AM (nếu Idle)
+
+#endif // CONFIG_H
