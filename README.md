@@ -26,7 +26,8 @@ Firmware điều khiển cửa cuốn dựa trên vi điều khiển ESP32, sử
 
 ## 🔌 Sơ đồ Mạch điện & Cấu trúc mã nguồn
 
-- **Sơ đồ nguyên lý:** `docs/diagram_electric.svg` (Bạn có thể xem trực tiếp ảnh SVG trên GitHub).
+<img src="docs/diagram_electric.svg" width="100%" />
+
 - **Tài liệu vẽ mạch gốc:** `draw/mainboard.qet` (Mở bằng QElectroTech).
 
 ---
