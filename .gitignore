@@ -13,3 +13,4 @@ test/
 *.swp
 .env
 .env.*
+.claude/
