@@ -54,8 +54,9 @@ IOT_Mydoor/
  │   ├── NetworkManager.h   # Khai báo lớp Quản lý Mạng, AP Cycle, Rate Limit
  │   └── WebUI.h            # HTML/CSS/JS giao diện Web nội bộ
  ├── src/
- │   ├── main.cpp           # Khởi tạo Dual-Core FreeRTOS, Zero-Glitch Boot, Control Logic
- │   └── NetworkManager.cpp # Code triển khai Web Server Async, Captive Portal, OTA
+ │   ├── main.cpp           # Khởi tạo Dual-Core FreeRTOS, Zero-Glitch Boot, Task WDT
+ │   ├── NetworkManager.cpp # Code triển khai Web Server Async, Captive Portal, OTA, NTP
+ │   └── ControlLogic.cpp   # Logic điều khiển Relay, NVS Dirty Flag, WDT Health (Core 1)
  ├── docs/
  │   ├── hardware_wiring.md # Hướng dẫn đấu nối điện
  │   └── diagram_electric.svg # Bản vẽ mạch điện SVG
@@ -75,10 +76,10 @@ Dự án được tối ưu hóa cho [PlatformIO](https://platformio.org/) trên
 4. Cắm cáp ESP32 và bấm **Upload (→)**.
 
 ### 2. Cấu hình Lần Đầu (Captive Portal)
-1. Khi khởi động lần đầu, hệ thống phát WiFi ẩn tên **`MyDoor_Setup`** (Mật khẩu: `12345678`).
+1. Khi khởi động lần đầu, hệ thống phát WiFi ẩn tên **`MyDoor_Setup`** (Mật khẩu mặc định có thể tự đổi trong mã nguồn).
 2. Nếu không thấy WiFi, nhấn giữ nút BOOT trong 5 giây.
 3. Kết nối vào mạng trên và truy cập `http://10.10.10.1`.
-4. Đăng nhập: `admin` / `admin` (Nên đổi ngay trong lần đầu).
+4. Đăng nhập với tài khoản thiết lập trước (Nên đổi ngay trong lần đầu).
 5. Quét và nhập WiFi Chính (Bắt buộc), WiFi Phụ (Dự phòng).
 6. Nhập `Blynk Template ID`, `Device Name`, và `Auth Token`.
 7. Thiết lập Múi giờ, Giờ bật/tắt an toàn cho Nguồn Box cửa. Bấm Lưu & Khởi động lại.

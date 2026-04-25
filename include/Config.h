@@ -1,6 +1,10 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
+// BLYNK TEMPLATE SETTINGS MUST BE BEFORE BLYNK INCLUDE
+#define BLYNK_TEMPLATE_ID "TMPLxxxxxx"
+#define BLYNK_TEMPLATE_NAME "MyDoor"
+
 // ==========================================
 // 1. BLYNK IOT CONFIGURATION (LẤY TỪ WEB BLYNK CONSOLE)
 // ==========================================
@@ -30,7 +34,8 @@
 #define PIN_LED_WARN    16  // YELLOW: Cảnh báo
 
 // Nút nhấn vật lý
-#define PIN_BTN_CONFIG  0   // Nút BOOT: Nhấn giữ để vào Web Config / Wake-up AP
+#define PIN_BTN_CONFIG  0   // Nút BOOT: Nhấn giữ 3s để Wake-up AP
+#define PIN_BTN_RESET   2   // Nút cứng Reset (Chung): Nhấn giữ 3s -> Reboot, Nhấn giữ 10s -> Factory Reset
 
 // ==========================================
 // 3. LOGIC STATES (CỰC KỲ QUAN TRỌNG ĐỂ KHÔNG CHẠP CHÁY)
@@ -55,6 +60,15 @@
 
 // Watchdog Timer (WDT)
 #define WDT_TIMEOUT_SEC    8      // Hardware WDT Timeout (8 giây)
+#define BLYNK_CONNECT_TIMEOUT_MS         1500
+#define BLYNK_RECONNECT_BASE_MS          5000
+#define BLYNK_RECONNECT_MAX_MS           60000
+#define BLYNK_POST_CONNECT_GUARD_MS      2500
+#define BLYNK_SSL_HANDSHAKE_TIMEOUT_SEC  3
+
+// FreeRTOS Yield Constants
+#define YIELD_WIFI_MS      20     // Thời gian nhường CPU cho stack Wi-Fi
+#define YIELD_BUTTON_MS    100    // Thời gian chờ poll nút nhấn
 
 // Cấu hình Task FreeRTOS (Priority: Control > Network)
 #define TASK_NETWORK_PRIORITY 1   // Ưu tiên thấp hơn cho Core 0 (Network)
@@ -66,6 +80,8 @@
 #define AP_CYCLE_ON_MS     600000 // 10 phút Bật AP (ms)
 #define AP_CYCLE_OFF_MS    300000 // 5 phút Tắt AP (ms)
 #define AP_LOCKOUT_MS      1800000// 30 phút khóa AP nếu nhập sai 5 lần (ms)
+#define RESCUE_AP_PASSWORD_LEN 16
+#define OTA_PASSWORD_LEN       20
 
 // Cảnh báo & Tự phục hồi
 #define MIN_FREE_HEAP      20000  // Ngưỡng RAM nguy hiểm (20KB), dưới mức này tự Reboot
