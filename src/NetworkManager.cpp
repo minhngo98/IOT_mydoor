@@ -57,6 +57,25 @@ String credentialMask(size_t length) {
   return mask;
 }
 
+String maskBlynk(const String& input) {
+  if (input.length() <= 6) return input;
+  String masked = input.substring(0, 3);
+  for (size_t i = 3; i < input.length() - 3; ++i) {
+    masked += '*';
+  }
+  masked += input.substring(input.length() - 3);
+  return masked;
+}
+
+bool hasSpecialChar(const String& s) {
+    for (size_t i = 0; i < s.length(); ++i) {
+        if (!isalnum(s.charAt(i))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void sendHtml(AsyncWebServerRequest* request, const char* html) {
   request->send(200, "text/html", reinterpret_cast<const uint8_t*>(html), strlen(html));
 }
@@ -126,34 +145,16 @@ void NetworkManager::loadConfig() {
 
   rescueApSsid = preferences.getString("rescue_ssid", "");
   if (rescueApSsid == "") {
-    rescueApSsid = buildRescueSsid(deviceId);
+    rescueApSsid = "esp32";
     preferences.putString("rescue_ssid", rescueApSsid);
   }
 
   rescueApPass = preferences.getString("rescue_pass", "");
   bool generatedRescuePass = false;
-  if (rescueApPass.length() < 12) {
-    rescueApPass = generateSecret(RESCUE_AP_PASSWORD_LEN);
+  if (rescueApPass.length() < 8) {
+    rescueApPass = "12345678";
     preferences.putString("rescue_pass", rescueApPass);
     generatedRescuePass = true;
-  }
-
-  otaUser = preferences.getString("ota_user", "");
-  if (otaUser == "") {
-    String suffix = deviceId;
-    if (suffix.length() > 6) {
-      suffix = suffix.substring(suffix.length() - 6);
-    }
-    otaUser = "ota-" + suffix;
-    preferences.putString("ota_user", otaUser);
-  }
-
-  otaPass = preferences.getString("ota_pass", "");
-  bool generatedOtaPass = false;
-  if (otaPass.length() < 12) {
-    otaPass = generateSecret(OTA_PASSWORD_LEN);
-    preferences.putString("ota_pass", otaPass);
-    generatedOtaPass = true;
   }
 
   timezone = preferences.getChar("timezone", 7); // Mặc định UTC+7
@@ -189,13 +190,6 @@ void NetworkManager::loadConfig() {
 
   preferences.end();
 
-  if (generatedRescuePass) {
-    Serial.printf("[SECURITY] Rescue AP da tao moi. SSID=%s PASSWORD=%s\n", rescueApSsid.c_str(), rescueApPass.c_str());
-  }
-  if (generatedOtaPass) {
-    Serial.printf("[SECURITY] OTA credentials da tao moi. USER=%s PASSWORD=%s\n", otaUser.c_str(), otaPass.c_str());
-  }
-
   if (claimRequired) {
     if (ssid == "") {
       Serial.println("[SECURITY] Thiet bi moi: bat buoc tao Admin truoc khi vao che do van hanh.");
@@ -205,6 +199,7 @@ void NetworkManager::loadConfig() {
   }
 
   Serial.println("[NVS] Da tai cau hinh: WiFi=" + ssid + ", DeviceID=" + deviceId + ", RescueAP=" + rescueApSsid);
+  Serial.println("[SECURITY] WARNING: Mật khẩu Rescue AP hiện tại là: " + rescueApPass);
 }
 
 void NetworkManager::setupAP() {
@@ -213,7 +208,7 @@ void NetworkManager::setupAP() {
   Blynk.disconnect();
   resetBlynkSessionState();
 #endif
-  WiFi.mode(WIFI_AP);
+  WiFi.mode(WIFI_AP_STA);
 
   // Set IP tĩnh cho Captive Portal: 10.10.10.1
   IPAddress local_ip(10, 10, 10, 1);
@@ -221,9 +216,14 @@ void NetworkManager::setupAP() {
   IPAddress subnet(255, 255, 255, 0);
   WiFi.softAPConfig(local_ip, gateway, subnet);
 
-  // Hidden SSID uses the per-device Rescue AP credential stored in NVS.
-  WiFi.softAP(rescueApSsid.c_str(), rescueApPass.c_str(), 1, 1);
-  Serial.println("[AP] Rescue AP dang hoat dong. Hidden=1, IP: 10.10.10.1");
+  // Ghi đè pass tạm thời và hiện SSID để dễ kết nối
+  rescueApPass = "12345678";
+  WiFi.softAP(rescueApSsid.c_str(), rescueApPass.c_str(), 1, 0);
+  Serial.println("[AP] Rescue AP dang hoat dong. Hidden=0, Pass=12345678, IP: 10.10.10.1");
+
+  if (ssid != "") {
+      WiFi.begin(ssid.c_str(), password.c_str());
+  }
 
   apStartTime = millis();
   setupWebServer();
@@ -271,6 +271,9 @@ bool NetworkManager::checkAuth(AsyncWebServerRequest *request) {
             isLockedOut = true;
             lockoutStartTime = millis();
             Serial.println("[SECURITY] Đã khóa truy cập AP 30 phút do sai Pass 5 lần!");
+        } else {
+            // Chậm phản hồi 1 giây để chống Bruteforce
+            delay(1000);
         }
         request->requestAuthentication("MyDoor Config Admin");
         return false;
@@ -283,42 +286,19 @@ bool NetworkManager::checkAuth(AsyncWebServerRequest *request) {
 }
 
 void NetworkManager::syncOtaAuth() {
-    // OTA uses its own credential pair and is enabled only after the device is claimed.
-    if (isFirstBoot || otaUser == "" || otaPass == "") {
+    // OTA uses the Admin credential pair and is enabled only after the device is claimed.
+    if (isFirstBoot || adminUser == "" || adminPass == "") {
         return;
     }
 
     if (!otaInitialized) {
-        ElegantOTA.begin(&server, otaUser.c_str(), otaPass.c_str());
+        ElegantOTA.begin(&server, adminUser.c_str(), adminPass.c_str());
         otaInitialized = true;
-        Serial.println("[SECURITY] ElegantOTA da bat voi OTA credential rieng.");
+        Serial.println("[SECURITY] ElegantOTA da bat voi Admin credential.");
     } else {
-        ElegantOTA.setAuth(otaUser.c_str(), otaPass.c_str());
-        Serial.println("[SECURITY] ElegantOTA da dong bo OTA credential moi.");
+        ElegantOTA.setAuth(adminUser.c_str(), adminPass.c_str());
+        Serial.println("[SECURITY] ElegantOTA da dong bo Admin credential moi.");
     }
-}
-
-void NetworkManager::rotateRescueApCredential() {
-    rescueApPass = generateSecret(RESCUE_AP_PASSWORD_LEN);
-
-    Preferences p;
-    p.begin("mydoor", false);
-    p.putString("rescue_pass", rescueApPass);
-    p.end();
-
-    Serial.println("[SECURITY] Rescue AP credential da duoc xoay vong.");
-}
-
-void NetworkManager::rotateOtaCredential() {
-    otaPass = generateSecret(OTA_PASSWORD_LEN);
-
-    Preferences p;
-    p.begin("mydoor", false);
-    p.putString("ota_pass", otaPass);
-    p.end();
-
-    syncOtaAuth();
-    Serial.println("[SECURITY] OTA credential da duoc xoay vong.");
 }
 
 void NetworkManager::setupWebServer() {
@@ -393,15 +373,10 @@ void NetworkManager::setupWebServer() {
                   ",\"days\":" + String(netManager.schedule_days) +
                   ",\"device_id\":\"" + netManager.deviceId + "\"" +
                   ",\"rescue_ssid\":\"" + netManager.rescueApSsid + "\"" +
-                  ",\"rescue_pass_len\":" + String(netManager.rescueApPass.length()) +
-                  ",\"rescue_pass_mask\":\"" + credentialMask(netManager.rescueApPass.length()) + "\"" +
-                  ",\"ota_user\":\"" + netManager.otaUser + "\"" +
-                  ",\"ota_pass_len\":" + String(netManager.otaPass.length()) +
-                  ",\"ota_pass_mask\":\"" + credentialMask(netManager.otaPass.length()) + "\"" +
-                  ",\"blynk_tmpl\":\"" + netManager.blynk_tmpl + "\"" +
-                  ",\"blynk_name\":\"" + netManager.blynk_name + "\"" +
-                  ",\"blynk_auth\":\"" + netManager.blynk_auth + "\"" +
-                  ",\"ssid2\":\"" + netManager.ssid2 + "\"}";
+                  ",\"blynk_tmpl\":\"" + maskBlynk(netManager.blynk_tmpl) + "\"" +
+                  ",\"blynk_name\":\"" + maskBlynk(netManager.blynk_name) + "\"" +
+                  ",\"blynk_auth\":\"" + maskBlynk(netManager.blynk_auth) + "\"" +
+                  ",\"power_box_on\":" + (controlLogic.isPowerBoxOn() ? "true" : "false") + "}";
     request->send(200, "application/json", json);
   });
 
@@ -425,9 +400,18 @@ void NetworkManager::setupWebServer() {
       saveStringIfChanged("pass", newPass);
       if(request->hasParam("ssid2", true)) saveStringIfChanged("ssid2", request->getParam("ssid2", true)->value());
       if(request->hasParam("pass2", true)) saveStringIfChanged("pass2", request->getParam("pass2", true)->value());
-      if(request->hasParam("blynk_tmpl", true)) saveStringIfChanged("blynk_tmpl", request->getParam("blynk_tmpl", true)->value());
-      if(request->hasParam("blynk_name", true)) saveStringIfChanged("blynk_name", request->getParam("blynk_name", true)->value());
-      if(request->hasParam("blynk_auth", true)) saveStringIfChanged("blynk_auth", request->getParam("blynk_auth", true)->value());
+      if(request->hasParam("blynk_tmpl", true)) {
+        String newVal = request->getParam("blynk_tmpl", true)->value();
+        if (newVal.length() > 0 && newVal.indexOf('*') == -1) saveStringIfChanged("blynk_tmpl", newVal);
+      }
+      if(request->hasParam("blynk_name", true)) {
+        String newVal = request->getParam("blynk_name", true)->value();
+        if (newVal.length() > 0 && newVal.indexOf('*') == -1) saveStringIfChanged("blynk_name", newVal);
+      }
+      if(request->hasParam("blynk_auth", true)) {
+        String newVal = request->getParam("blynk_auth", true)->value();
+        if (newVal.length() > 0 && newVal.indexOf('*') == -1) saveStringIfChanged("blynk_auth", newVal);
+      }
 
       p.end();
 
@@ -492,33 +476,73 @@ void NetworkManager::setupWebServer() {
     } else request->send(400, "text/plain", "Bad Request");
   });
 
-  server.on("/rotate_rescue_ap", ASYNC_POST, [](AsyncWebServerRequest *request){
+  server.on("/save_rescue_ap", ASYNC_POST, [](AsyncWebServerRequest *request){
     if (!netManager.checkAuth(request)) return;
 
-    bool restartAp = netManager.isApMode;
-    netManager.rotateRescueApCredential();
-    request->send(200, "text/plain", "OK");
+    if(request->hasParam("rescue_ap_ssid", true) && request->hasParam("rescue_ap_pass", true)) {
+      String newSsid = request->getParam("rescue_ap_ssid", true)->value();
+      String newPass = request->getParam("rescue_ap_pass", true)->value();
 
-    if (restartAp) {
-      delay(250);
-      WiFi.softAPdisconnect(true);
-      netManager.setupAP();
-    }
+      if (newSsid.length() < 4 || newPass.length() < 8 || !hasSpecialChar(newPass)) {
+        return request->send(400, "text/plain", "SSID hoặc Mật khẩu quá ngắn, hoặc Mật khẩu thiếu ký tự đặc biệt (VD: @, #, $, ...).");
+      }
+
+      Preferences p; p.begin("mydoor", false);
+      p.putString("rescue_ssid", newSsid);
+      p.putString("rescue_pass", newPass);
+      p.end();
+
+      netManager.rescueApSsid = newSsid;
+      netManager.rescueApPass = newPass;
+
+      request->send(200, "text/plain", "OK");
+
+      if (netManager.isApMode) {
+        delay(250);
+        WiFi.softAPdisconnect(true);
+        netManager.setupAP();
+      }
+    } else request->send(400, "text/plain", "Bad Request");
   });
 
-  server.on("/rotate_ota", ASYNC_POST, [](AsyncWebServerRequest *request){
-    if (!netManager.checkAuth(request)) return;
-
-    netManager.rotateOtaCredential();
-    request->send(200, "text/plain", "OK");
-  });
-
-  // API Reboot
+  // API Khởi động lại
   server.on("/reboot", ASYNC_POST, [](AsyncWebServerRequest *request){
     if (!netManager.checkAuth(request)) return;
 
     request->send(200, "text/plain", "Rebooting");
     delay(1000); ESP.restart();
+  });
+
+  // API API Control Cửa (Up/Stop/Down)
+  server.on("/control", ASYNC_POST, [](AsyncWebServerRequest *request){
+    if (!netManager.checkAuth(request)) return;
+
+    if(request->hasParam("cmd", true)) {
+        String cmd = request->getParam("cmd", true)->value();
+        if (cmd == "up") controlLogic.executeRemoteCommand(CMD_UP);
+        else if (cmd == "stop") controlLogic.executeRemoteCommand(CMD_STOP);
+        else if (cmd == "down") controlLogic.executeRemoteCommand(CMD_DOWN);
+
+        request->send(200, "text/plain", "OK");
+    } else {
+        request->send(400, "text/plain", "Missing cmd");
+    }
+  });
+
+  // API Đóng/Cắt Nguồn Tổng Relay 4
+  server.on("/power", ASYNC_POST, [](AsyncWebServerRequest *request){
+    if (!netManager.checkAuth(request)) return;
+
+    if(request->hasParam("state", true)) {
+        String state = request->getParam("state", true)->value();
+        bool turnOn = (state == "1" || state == "true");
+        controlLogic.togglePowerBox(turnOn);
+        netManager.pushBlynkState();
+
+        request->send(200, "text/plain", "OK");
+    } else {
+        request->send(400, "text/plain", "Missing state");
+    }
   });
 
   // Khởi động ElegantOTA (/update) -> Nạp file .bin từ trình duyệt
@@ -793,6 +817,12 @@ void NetworkManager::handleWiFi() {
   if (wifiLostFlag && millis() - wifiLostTime >= 300000 && !isApMode) {
       Serial.println("[AP] Mat ket noi 5 phut, tu dong bat Rescue AP!");
       setupAP();
+  }
+
+  // Nếu đang ở AP mode nhưng lại có connection STA được khôi phục ngầm (WIFI_AP_STA), tắt cờ lost
+  if (isApMode && WiFi.status() == WL_CONNECTED) {
+      isConnected = true;
+      wifiLostFlag = false;
   }
 }
 

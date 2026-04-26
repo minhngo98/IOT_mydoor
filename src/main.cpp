@@ -41,7 +41,7 @@ void setup() {
   controlLogic.begin();
 
   // 1. Task Watchdog (TWDT)
-  esp_task_wdt_init(WDT_TIMEOUT_SEC, true);
+  esp_task_wdt_init(WDT_TIMEOUT_SEC, true); // Khởi tạo TWDT, true = trigger panic nếu timeout
 
   // 2. Khởi tạo Dual-Core FreeRTOS
   xTaskCreatePinnedToCore(
