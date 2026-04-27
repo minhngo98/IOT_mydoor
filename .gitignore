@@ -14,3 +14,5 @@ test/
 .env
 .env.*
 .claude/
+*.svg
+
