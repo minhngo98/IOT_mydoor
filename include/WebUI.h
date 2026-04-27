@@ -178,6 +178,14 @@ const char* index_html = R"rawliteral(
             </form>
         </div>
 
+        <div class="card">
+            <div class="card-header">📝 Nhật Ký Hoạt Động (Logs)</div>
+            <div style="background: #000; padding: 10px; border-radius: 6px; border: 1px solid #333;">
+                <textarea id="terminalLog" readonly style="width: 100%; height: 120px; background: transparent; color: #0f0; border: none; font-family: monospace; font-size: 0.85em; resize: none; outline: none;">Đang lấy logs...</textarea>
+            </div>
+            <button class="btn btn-scan" onclick="fetchLogs()" style="margin-top: 10px;">Làm Mới Log</button>
+        </div>
+
         <!-- TAB: HẸN GIỜ NGUỒN TỔNG -->
         <div class="card">
             <div class="card-header">⏰ Hẹn Giờ Nguồn Tổng (Relay 4)</div>
@@ -263,6 +271,60 @@ const char* index_html = R"rawliteral(
     </div>
 
     <script>
+        function controlDoor(cmd) {
+            fetch('/control', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'cmd=' + cmd
+            });
+        }
+
+        function togglePower() {
+            const current = document.getElementById('powerStatus').textContent === 'ON';
+            fetch('/power', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'state=' + (!current ? '1' : '0')
+            }).then(() => updateStatus());
+        }
+
+        function toggleLight() {
+            const current = document.getElementById('lightStatus').textContent === 'ON';
+            fetch('/light', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'state=' + (!current ? '1' : '0')
+            }).then(() => updateStatus());
+        }
+
+        async function fetchLogs() {
+            try {
+                const res = await fetch('/logs');
+                const text = await res.text();
+                const ta = document.getElementById('terminalLog');
+                ta.value = text;
+                ta.scrollTop = ta.scrollHeight; // Cuộn xuống cuối
+            } catch(e) {}
+        }
+
+        async function updateStatus() {
+            try {
+                const data = await fetch('/get_config').then(r => r.json());
+
+                const pStatus = document.getElementById('powerStatus');
+                pStatus.textContent = data.power_box_on ? 'ON' : 'OFF';
+                pStatus.className = 'status-badge ' + (data.power_box_on ? 'status-on' : 'status-off');
+
+                const lStatus = document.getElementById('lightStatus');
+                if (lStatus) {
+                    lStatus.textContent = data.light_on ? 'ON' : 'OFF';
+                    lStatus.className = 'status-badge ' + (data.light_on ? 'status-on' : 'status-off');
+                }
+                fetchLogs(); // Lấy thêm log
+            } catch (e) {}
+        }
+        setInterval(updateStatus, 3000); // Tự động cập nhật mỗi 3s
+
         // Khởi tạo các select box Giờ/Phút và Timezone
         function initSelects() {
             let tzHTML = '';
@@ -293,6 +355,10 @@ const char* index_html = R"rawliteral(
             document.getElementById('on_min').value = data.on_min;
             document.getElementById('off_hour').value = data.off_hour;
             document.getElementById('off_min').value = data.off_min;
+            document.getElementById('l_on_hour').value = data.l_on_hour;
+            document.getElementById('l_on_min').value = data.l_on_min;
+            document.getElementById('l_off_hour').value = data.l_off_hour;
+            document.getElementById('l_off_min').value = data.l_off_min;
             document.getElementById('blynk_tmpl').value = data.blynk_tmpl || '';
             document.getElementById('blynk_name').value = data.blynk_name || '';
             document.getElementById('blynk_auth').value = data.blynk_auth || '';
@@ -304,7 +370,11 @@ const char* index_html = R"rawliteral(
             for(let i=0; i<7; i++) {
                 const day = document.querySelector(`input[name="day_${i}"]`);
                 day.checked = !!(data.days && (data.days & (1 << i)));
+                const l_day = document.querySelector(`input[name="l_day_${i}"]`);
+                l_day.checked = !!(data.l_days && (data.l_days & (1 << i)));
             }
+
+            updateStatus(); // Gọi ngay 1 lần lúc đầu
         }
         loadDeviceConfig();
 

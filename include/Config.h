@@ -14,6 +14,7 @@
   #define VPIN_DOOR_STOP  V2  // Nút DỪNG (Button)
   #define VPIN_POWER_BOX  V3  // Công tắc Nguồn Tổng (Switch)
   #define VPIN_TERMINAL   V4  // Terminal hiển thị Log sự kiện
+  #define VPIN_LIGHT      V5  // Nút Bật/Tắt Đèn (Switch)
 #endif
 
 // ==========================================
@@ -24,8 +25,11 @@
 #define PIN_RELAY_DOWN  26  // IN2: Kéo XUỐNG
 #define PIN_RELAY_STOP  27  // IN3: DỪNG
 
-// Relay 4: Cấp/Ngắt Nguồn Tổng Box Cửa Cuốn
+// Relay Cấp/Ngắt Nguồn Tổng Box Cửa Cuốn
 #define PIN_RELAY_POWER 32  // IN4: Điều khiển nguồn box điều khiển (Bật ban ngày, Tắt ban đêm)
+
+// Relay Điều khiển Đèn Chiếu Sáng
+#define PIN_RELAY_LIGHT 33  // IN5: Điều khiển Đèn (Lighting)
 
 // Đèn LED Trạng thái (Active LOW: Sáng khi kéo xuống GND)
 #define PIN_LED_WIFI    13  // BLUE: Trạng thái WiFi/Cloud
@@ -36,6 +40,7 @@
 // Nút nhấn vật lý
 #define PIN_BTN_CONFIG  0   // Nút BOOT: Nhấn giữ 3s để Wake-up AP
 #define PIN_BTN_RESET   2   // Nút cứng Reset (Chung): Nhấn giữ 3s -> Reboot, Nhấn giữ 10s -> Factory Reset
+#define PIN_BTN_LIGHT   15  // Nút cứng Điều khiển Đèn tại chỗ
 
 // ==========================================
 // 3. LOGIC STATES (CỰC KỲ QUAN TRỌNG ĐỂ KHÔNG CHẠP CHÁY)
@@ -80,8 +85,14 @@
 #define AP_CYCLE_ON_MS     600000 // 10 phút Bật AP (ms)
 #define AP_CYCLE_OFF_MS    300000 // 5 phút Tắt AP (ms)
 #define AP_LOCKOUT_MS      1800000// 30 phút khóa AP nếu nhập sai 5 lần (ms)
-#define RESCUE_AP_PASSWORD_LEN 16
-#define OTA_PASSWORD_LEN       20
+
+// Mật khẩu mặc định xuất xưởng (First Boot)
+#define DEFAULT_RESCUE_AP_SSID "HomeSmartbyMinh"
+#define DEFAULT_RESCUE_AP_PASS "04011998"
+
+// Ngưỡng thời gian Reset cứng (ms)
+#define RESET_REBOOT_HOLD_MS    3000  // 3s: Reboot
+#define RESET_FACTORY_HOLD_MS   10000 // 10s: Factory Reset
 
 // Cảnh báo & Tự phục hồi
 #define MIN_FREE_HEAP      20000  // Ngưỡng RAM nguy hiểm (20KB), dưới mức này tự Reboot

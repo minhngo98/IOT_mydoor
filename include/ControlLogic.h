@@ -12,7 +12,9 @@ enum RemoteCommand {
     CMD_NONE,
     CMD_UP,
     CMD_DOWN,
-    CMD_STOP
+    CMD_STOP,
+    CMD_LIGHT_ON,
+    CMD_LIGHT_OFF
 };
 
 class ControlLogic {
@@ -26,21 +28,33 @@ public:
     void togglePowerBox(bool turnOn);
     bool isPowerBoxOn();
 
+    // Toggle Light
+    void toggleLight(bool turnOn);
+    bool isLightOn();
+    void handleInterruptBtnLight();
+
     // Đồng bộ thời gian (NTP từ Core 0 báo về)
     void setLocalTime(int hour, int min);
+    void getLocalTimeSafe(int& hour, int& min);
 
 private:
     Preferences preferences;
     bool currentPowerBoxState;
+    bool currentLightState;
 
-    // Quản lý Command Queue
+    volatile bool interruptBtnLightTriggered;
+
+    // Quản lý Command Queue và Mutex
     QueueHandle_t commandQueue;
+    SemaphoreHandle_t timeMutex;
 
     // Zero-Glitch Boot & NVS
     void initGPIO();
     void loadPersistedState();
     void savePowerBoxState(bool state);
     void latchPowerRelay(bool state);
+    void saveLightState(bool state);
+    void latchLightRelay(bool state);
 
     // Relay Control (Non-blocking)
     void processPendingCommand();

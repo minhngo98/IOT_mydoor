@@ -95,7 +95,75 @@ NetworkManager::NetworkManager() : server(80), isApMode(false), isConnected(fals
   failedAuthCount(0), lockoutStartTime(0), isLockedOut(false), interruptConfigTriggered(false),
   interruptResetTriggered(false), claimRequired(false), webServerInitialized(false), isFirstBoot(false),
   otaInitialized(false), lastBlynkConnectAttempt(0), blynkReconnectBackoffMs(BLYNK_RECONNECT_BASE_MS),
-  blynkRemoteGuardUntil(0), blynkWasConnected(false), blynkInvalidToken(false) {
+  blynkRemoteGuardUntil(0), blynkWasConnected(false), blynkInvalidToken(false), logIndex(0) {
+    stringMutex = xSemaphoreCreateMutex();
+}
+
+String NetworkManager::safeGetString(const String& str) {
+    String copy;
+    if (xSemaphoreTake(stringMutex, portMAX_DELAY)) {
+        copy = str;
+        xSemaphoreGive(stringMutex);
+    }
+    return copy;
+}
+
+void NetworkManager::safeSetString(String& target, const String& value) {
+    if (xSemaphoreTake(stringMutex, portMAX_DELAY)) {
+        target = value;
+        xSemaphoreGive(stringMutex);
+    }
+}
+
+void NetworkManager::logEvent(const String& message) {
+    // 1. In ra Serial Console
+    Serial.println(message);
+
+    // 2. Thêm thời gian nếu có thể (lấy từ timeinfo)
+    struct tm timeinfo;
+    String timeStr = "";
+    if (getLocalTime(&timeinfo, 10)) {
+        char buf[20];
+        snprintf(buf, sizeof(buf), "[%02d:%02d:%02d] ", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+        timeStr = String(buf);
+    } else {
+        timeStr = "[--:--:--] ";
+    }
+
+    String logLine = timeStr + message;
+
+    // 3. Đưa vào mảng log (Ring Buffer đơn giản 15 dòng cho WebUI)
+    if (xSemaphoreTake(stringMutex, portMAX_DELAY)) {
+        eventLogs[logIndex] = logLine;
+        logIndex = (logIndex + 1) % 15;
+        xSemaphoreGive(stringMutex);
+    }
+
+    // 4. Gửi lên Blynk Terminal (V4)
+#ifdef USE_BLYNK
+    if (Blynk.connected()) {
+        Blynk.virtualWrite(VPIN_TERMINAL, logLine + "\n");
+    }
+#endif
+}
+
+String NetworkManager::getRecentLogs() const {
+    String output = "";
+    if (xSemaphoreTake(stringMutex, portMAX_DELAY)) {
+        int count = 0;
+        int idx = logIndex;
+        // Đi lùi từ log mới nhất về log cũ nhất
+        while (count < 15) {
+            idx--;
+            if (idx < 0) idx = 14;
+            if (eventLogs[idx].length() > 0) {
+                output += eventLogs[idx] + "\n";
+            }
+            count++;
+        }
+        xSemaphoreGive(stringMutex);
+    }
+    return output;
 }
 
 void NetworkManager::handleInterruptConfig() {
@@ -139,9 +207,9 @@ void NetworkManager::loadConfig() {
   adminUser = preferences.getString("admin_user", "");
   adminPass = preferences.getString("admin_pass", "");
 
-  blynk_tmpl = preferences.getString("blynk_tmpl", "");
-  blynk_name = preferences.getString("blynk_name", "");
-  blynk_auth = preferences.getString("blynk_auth", "");
+  blynkTemplate = preferences.getString("blynk_tmpl", "");
+  blynkName = preferences.getString("blynk_name", "");
+  blynkAuth = preferences.getString("blynk_auth", "");
 
   rescueApSsid = preferences.getString("rescue_ssid", "");
   if (rescueApSsid == "") {
@@ -158,11 +226,17 @@ void NetworkManager::loadConfig() {
   }
 
   timezone = preferences.getChar("timezone", 7); // Mặc định UTC+7
-  on_hour = preferences.getUChar("on_hour", 6); // Mặc định bật 6h sáng
-  on_min = preferences.getUChar("on_min", 0);
-  off_hour = preferences.getUChar("off_hour", 23); // Tắt 23h đêm
-  off_min = preferences.getUChar("off_min", 0);
-  schedule_days = preferences.getUChar("days", 127); // Mặc định cả tuần (1111111 = 127)
+  onHour = preferences.getUChar("on_hour", 6); // Mặc định bật 6h sáng
+  onMin = preferences.getUChar("on_min", 0);
+  offHour = preferences.getUChar("off_hour", 23); // Tắt 23h đêm
+  offMin = preferences.getUChar("off_min", 0);
+  scheduleDays = preferences.getUChar("days", 127); // Mặc định cả tuần (1111111 = 127)
+
+  lightOnHour = preferences.getUChar("l_on_hour", 18); // Đèn bật 18h tối
+  lightOnMin = preferences.getUChar("l_on_min", 0);
+  lightOffHour = preferences.getUChar("l_off_hour", 5); // Đèn tắt 5h sáng
+  lightOffMin = preferences.getUChar("l_off_min", 0);
+  lightScheduleDays = preferences.getUChar("l_days", 127);
 
   // Xử lý cờ First Boot và tương thích ngược
   if (ssid == "") {
@@ -245,9 +319,9 @@ void NetworkManager::setupSTA() {
   setupWebServer();
 
 #ifdef USE_BLYNK
-  if (blynk_auth.length() > 5) {
+  if (blynkAuth.length() > 5) {
     _blynkTransport.setHandshakeTimeoutSeconds(BLYNK_SSL_HANDSHAKE_TIMEOUT_SEC);
-    Blynk.config(blynk_auth.c_str(), "blynk.cloud", 443);
+    Blynk.config(blynkAuth.c_str(), "blynk.cloud", 443);
     Serial.println("[BLYNK] Da khoi tao cau hinh Blynk SSL.");
   }
 #endif
@@ -328,7 +402,7 @@ void NetworkManager::setupWebServer() {
               // Bây giờ đã có Admin, cấp phép chạy OTA Server
               netManager.syncOtaAuth();
 
-              Serial.println("[SECURITY] Đã tạo tài khoản Admin lần đầu: " + newUser);
+              netManager.logEvent("Admin setup completed.");
               return request->send(200, "text/plain", "OK");
           }
       }
@@ -366,17 +440,23 @@ void NetworkManager::setupWebServer() {
     if (!netManager.checkAuth(request)) return;
 
     String json = "{\"timezone\":" + String(netManager.timezone) +
-                  ",\"on_hour\":" + String(netManager.on_hour) +
-                  ",\"on_min\":" + String(netManager.on_min) +
-                  ",\"off_hour\":" + String(netManager.off_hour) +
-                  ",\"off_min\":" + String(netManager.off_min) +
-                  ",\"days\":" + String(netManager.schedule_days) +
+                  ",\"on_hour\":" + String(netManager.onHour) +
+                  ",\"on_min\":" + String(netManager.onMin) +
+                  ",\"off_hour\":" + String(netManager.offHour) +
+                  ",\"off_min\":" + String(netManager.offMin) +
+                  ",\"days\":" + String(netManager.scheduleDays) +
+                  ",\"l_on_hour\":" + String(netManager.lightOnHour) +
+                  ",\"l_on_min\":" + String(netManager.lightOnMin) +
+                  ",\"l_off_hour\":" + String(netManager.lightOffHour) +
+                  ",\"l_off_min\":" + String(netManager.lightOffMin) +
+                  ",\"l_days\":" + String(netManager.lightScheduleDays) +
                   ",\"device_id\":\"" + netManager.deviceId + "\"" +
-                  ",\"rescue_ssid\":\"" + netManager.rescueApSsid + "\"" +
-                  ",\"blynk_tmpl\":\"" + maskBlynk(netManager.blynk_tmpl) + "\"" +
-                  ",\"blynk_name\":\"" + maskBlynk(netManager.blynk_name) + "\"" +
-                  ",\"blynk_auth\":\"" + maskBlynk(netManager.blynk_auth) + "\"" +
-                  ",\"power_box_on\":" + (controlLogic.isPowerBoxOn() ? "true" : "false") + "}";
+                  ",\"rescue_ssid\":\"" + netManager.safeGetString(netManager.rescueApSsid) + "\"" +
+                  ",\"blynk_tmpl\":\"" + maskBlynk(netManager.safeGetString(netManager.blynkTemplate)) + "\"" +
+                  ",\"blynk_name\":\"" + maskBlynk(netManager.safeGetString(netManager.blynkName)) + "\"" +
+                  ",\"blynk_auth\":\"" + maskBlynk(netManager.safeGetString(netManager.blynkAuth)) + "\"" +
+                  ",\"power_box_on\":" + (controlLogic.isPowerBoxOn() ? "true" : "false") +
+                  ",\"light_on\":" + (controlLogic.isLightOn() ? "true" : "false") + "}";
     request->send(200, "application/json", json);
   });
 
@@ -445,6 +525,17 @@ void NetworkManager::setupWebServer() {
     }
     saveUCharIfChanged("days", days);
 
+    if(request->hasParam("l_on_hour", true)) saveUCharIfChanged("l_on_hour", request->getParam("l_on_hour", true)->value().toInt());
+    if(request->hasParam("l_on_min", true))  saveUCharIfChanged("l_on_min", request->getParam("l_on_min", true)->value().toInt());
+    if(request->hasParam("l_off_hour", true)) saveUCharIfChanged("l_off_hour", request->getParam("l_off_hour", true)->value().toInt());
+    if(request->hasParam("l_off_min", true))  saveUCharIfChanged("l_off_min", request->getParam("l_off_min", true)->value().toInt());
+
+    uint8_t l_days = 0;
+    for(int i=0; i<7; i++) {
+      if(request->hasParam("l_day_" + String(i), true)) l_days |= (1 << i);
+    }
+    saveUCharIfChanged("l_days", l_days);
+
     p.end();
 
     netManager.loadConfig(); // Load lại ngay vào RAM
@@ -492,8 +583,8 @@ void NetworkManager::setupWebServer() {
       p.putString("rescue_pass", newPass);
       p.end();
 
-      netManager.rescueApSsid = newSsid;
-      netManager.rescueApPass = newPass;
+      netManager.safeSetString(netManager.rescueApSsid, newSsid);
+      netManager.safeSetString(netManager.rescueApPass, newPass);
 
       request->send(200, "text/plain", "OK");
 
@@ -519,9 +610,18 @@ void NetworkManager::setupWebServer() {
 
     if(request->hasParam("cmd", true)) {
         String cmd = request->getParam("cmd", true)->value();
-        if (cmd == "up") controlLogic.executeRemoteCommand(CMD_UP);
-        else if (cmd == "stop") controlLogic.executeRemoteCommand(CMD_STOP);
-        else if (cmd == "down") controlLogic.executeRemoteCommand(CMD_DOWN);
+        if (cmd == "up") {
+            controlLogic.executeRemoteCommand(CMD_UP);
+            netManager.logEvent("Cua: LEN (WebUI)");
+        }
+        else if (cmd == "stop") {
+            controlLogic.executeRemoteCommand(CMD_STOP);
+            netManager.logEvent("Cua: DUNG (WebUI)");
+        }
+        else if (cmd == "down") {
+            controlLogic.executeRemoteCommand(CMD_DOWN);
+            netManager.logEvent("Cua: XUONG (WebUI)");
+        }
 
         request->send(200, "text/plain", "OK");
     } else {
@@ -537,12 +637,36 @@ void NetworkManager::setupWebServer() {
         String state = request->getParam("state", true)->value();
         bool turnOn = (state == "1" || state == "true");
         controlLogic.togglePowerBox(turnOn);
+        netManager.logEvent("Nguon Box: " + String(turnOn ? "BAT" : "TAT") + " (WebUI)");
         netManager.pushBlynkState();
 
         request->send(200, "text/plain", "OK");
     } else {
         request->send(400, "text/plain", "Missing state");
     }
+  });
+
+  // API Đóng/Cắt Đèn
+  server.on("/light", ASYNC_POST, [](AsyncWebServerRequest *request){
+    if (!netManager.checkAuth(request)) return;
+
+    if(request->hasParam("state", true)) {
+        String state = request->getParam("state", true)->value();
+        bool turnOn = (state == "1" || state == "true");
+        controlLogic.toggleLight(turnOn);
+        netManager.logEvent("Den: " + String(turnOn ? "BAT" : "TAT") + " (WebUI)");
+        netManager.pushBlynkState();
+
+        request->send(200, "text/plain", "OK");
+    } else {
+        request->send(400, "text/plain", "Missing state");
+    }
+  });
+
+  // API Đọc Lịch Sử Logs cho WebUI
+  server.on("/logs", ASYNC_GET, [](AsyncWebServerRequest *request){
+    if (!netManager.checkAuth(request)) return;
+    request->send(200, "text/plain", netManager.getRecentLogs());
   });
 
   // Khởi động ElegantOTA (/update) -> Nạp file .bin từ trình duyệt
@@ -575,8 +699,8 @@ void NetworkManager::checkAPCycle() {
 }
 
 bool NetworkManager::isScheduleActiveNow(int currentMins) {
-  int onMins = on_hour * 60 + on_min;
-  int offMins = off_hour * 60 + off_min;
+  int onMins = onHour * 60 + onMin;
+  int offMins = offHour * 60 + offMin;
 
   if (onMins == offMins) return false;
 
@@ -587,14 +711,38 @@ bool NetworkManager::isScheduleActiveNow(int currentMins) {
   uint8_t today = timeinfo.tm_wday;
   uint8_t yesterday = (today + 6) % 7;
 
-  bool todayActive = (schedule_days & (1 << today)) != 0;
-  bool yesterdayActive = (schedule_days & (1 << yesterday)) != 0;
+  bool todayActive = (scheduleDays & (1 << today)) != 0;
+  bool yesterdayActive = (scheduleDays & (1 << yesterday)) != 0;
 
   if (onMins < offMins) {
       // Lịch cùng ngày (VD: 06:00 -> 23:00)
       return todayActive && currentMins >= onMins && currentMins < offMins;
   } else {
       // Lịch qua đêm (VD: 22:00 -> 06:00)
+      bool activeToday = todayActive && currentMins >= onMins;
+      bool activeYesterday = yesterdayActive && currentMins < offMins;
+      return activeToday || activeYesterday;
+  }
+}
+
+bool NetworkManager::isLightScheduleActiveNow(int currentMins) {
+  int onMins = lightOnHour * 60 + lightOnMin;
+  int offMins = lightOffHour * 60 + lightOffMin;
+
+  if (onMins == offMins) return false;
+
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo, 100)) return false;
+
+  uint8_t today = timeinfo.tm_wday;
+  uint8_t yesterday = (today + 6) % 7;
+
+  bool todayActive = (lightScheduleDays & (1 << today)) != 0;
+  bool yesterdayActive = (lightScheduleDays & (1 << yesterday)) != 0;
+
+  if (onMins < offMins) {
+      return todayActive && currentMins >= onMins && currentMins < offMins;
+  } else {
       bool activeToday = todayActive && currentMins >= onMins;
       bool activeYesterday = yesterdayActive && currentMins < offMins;
       return activeToday || activeYesterday;
@@ -628,12 +776,27 @@ void NetworkManager::checkNTP() {
       controlLogic.togglePowerBox(false);
       pushBlynkState();
   }
+
+  // Logic tự động bật/tắt Đèn (Relay 5)
+  bool lightScheduleActiveNow = isLightScheduleActiveNow(currentMins);
+
+  if (lightScheduleActiveNow && !controlLogic.isLightOn()) {
+      Serial.printf("[AUTO] %02d:%02d - Den gio bat Den\n", timeinfo.tm_hour, timeinfo.tm_min);
+      controlLogic.toggleLight(true);
+      pushBlynkState();
+  }
+  else if (!lightScheduleActiveNow && controlLogic.isLightOn()) {
+      Serial.printf("[AUTO] %02d:%02d - Den gio tat Den\n", timeinfo.tm_hour, timeinfo.tm_min);
+      controlLogic.toggleLight(false);
+      pushBlynkState();
+  }
 }
 
 void NetworkManager::pushBlynkState() {
 #ifdef USE_BLYNK
   if (Blynk.connected()) {
       Blynk.virtualWrite(VPIN_POWER_BOX, controlLogic.isPowerBoxOn() ? 1 : 0);
+      Blynk.virtualWrite(VPIN_LIGHT, controlLogic.isLightOn() ? 1 : 0);
   }
 #endif
 }
@@ -660,6 +823,9 @@ BLYNK_WRITE(VPIN_DOOR_STOP) {
 BLYNK_WRITE(VPIN_POWER_BOX) {
   netManager.handleRemotePowerCommand(param.asInt() == 1);
 }
+BLYNK_WRITE(VPIN_LIGHT) {
+  netManager.handleRemoteLightCommand(param.asInt() == 1);
+}
 #endif
 
 void NetworkManager::handleRemoteDoorCommand(RemoteCommand cmd) {
@@ -668,6 +834,9 @@ void NetworkManager::handleRemoteDoorCommand(RemoteCommand cmd) {
       Serial.println("[BLYNK] Bo qua lenh cua do session cloud vua reconnect hoac chua san sang.");
       return;
   }
+  if (cmd == CMD_UP) logEvent("Cua: LEN (Blynk)");
+  else if (cmd == CMD_DOWN) logEvent("Cua: XUONG (Blynk)");
+  else if (cmd == CMD_STOP) logEvent("Cua: DUNG (Blynk)");
 #endif
   controlLogic.executeRemoteCommand(cmd);
 }
@@ -679,8 +848,22 @@ void NetworkManager::handleRemotePowerCommand(bool turnOn) {
       pushBlynkState();
       return;
   }
+  logEvent("Nguon Box: " + String(turnOn ? "BAT" : "TAT") + " (Blynk)");
 #endif
   controlLogic.togglePowerBox(turnOn);
+  pushBlynkState();
+}
+
+void NetworkManager::handleRemoteLightCommand(bool turnOn) {
+#ifdef USE_BLYNK
+  if (!canAcceptRemoteCommands()) {
+      Serial.println("[BLYNK] Bo qua lenh den do server dang replay trang thai cu.");
+      pushBlynkState();
+      return;
+  }
+  logEvent("Den: " + String(turnOn ? "BAT" : "TAT") + " (Blynk)");
+#endif
+  controlLogic.toggleLight(turnOn);
   pushBlynkState();
 }
 
@@ -725,7 +908,7 @@ void NetworkManager::resetBlynkSessionState() {
 
 void NetworkManager::handleBlynk() {
 #ifdef USE_BLYNK
-  if (isApMode || !isConnected || isFirstBoot || blynk_auth.length() <= 5) {
+  if (isApMode || !isConnected || isFirstBoot || blynkAuth.length() <= 5) {
       if (Blynk.connected()) {
           Blynk.disconnect();
       }

@@ -30,17 +30,22 @@ public:
     bool isFirstBoot; // Biến cờ xác định thiết bị có cần tạo Admin lần đầu không
 
     // Cloud Configuration (Blynk)
-    String blynk_tmpl;
-    String blynk_name;
-    String blynk_auth;
+    String blynkTemplate;
+    String blynkName;
+    String blynkAuth;
     String deviceId;
     String rescueApSsid;
 
-    // Lịch trình Relay 4
+    // Lịch trình Relay 4 (Nguồn Box)
     int8_t timezone;
-    uint8_t on_hour, on_min;
-    uint8_t off_hour, off_min;
-    uint8_t schedule_days; // Bitmask: bit 0=CN, bit 1=T2... bit 6=T7
+    uint8_t onHour, onMin;
+    uint8_t offHour, offMin;
+    uint8_t scheduleDays; // Bitmask: bit 0=CN, bit 1=T2... bit 6=T7
+
+    // Lịch trình Relay 5 (Đèn)
+    uint8_t lightOnHour, lightOnMin;
+    uint8_t lightOffHour, lightOffMin;
+    uint8_t lightScheduleDays;
 
     bool isApMode;
     bool isConnected;
@@ -57,15 +62,23 @@ public:
     void pushBlynkState();
     void handleRemoteDoorCommand(RemoteCommand cmd);
     void handleRemotePowerCommand(bool turnOn);
+    void handleRemoteLightCommand(bool turnOn);
     void onBlynkConnected();
     void onBlynkDisconnected();
     bool canAcceptRemoteCommands() const;
-    void rotateRescueApCredential();
-    void rotateOtaCredential();
+
+    // Log Terminal
+    void logEvent(const String& message);
+    String getRecentLogs() const;
 
 private:
     AsyncWebServer server;
     Preferences preferences;
+    SemaphoreHandle_t stringMutex; // Mutex bảo vệ truy cập biến String giữa các luồng
+
+    // Lưu trữ log tối đa (Ring buffer cơ bản)
+    String eventLogs[15];
+    int logIndex;
 
     unsigned long lastWiFiCheck;
 
@@ -75,13 +88,15 @@ private:
     unsigned long wifiLostTime;
     bool wifiLostFlag;
 
+    // Cờ nút nhấn Reset
+    unsigned long resetBtnPressTime;
+    bool resetBtnPressed;
+
     // Bảo mật & Rate Limit
     uint8_t failedAuthCount;
     unsigned long lockoutStartTime;
     bool isLockedOut;
     String rescueApPass;
-    String otaUser;
-    String otaPass;
     bool claimRequired;
 
     // Cờ báo ngắt
@@ -90,6 +105,7 @@ private:
 
     // Helper functions cho AP cycle và Schedule
     bool isScheduleActiveNow(int currentMins);
+    bool isLightScheduleActiveNow(int currentMins);
 
     void loadConfig();
     void setupAP();
@@ -97,9 +113,12 @@ private:
     void setupWebServer();
     void checkAPCycle();
     void handleWiFi();
+    void handleResetButton();
     bool checkAuth(AsyncWebServerRequest *request);
     void handleBlynk();
     void resetBlynkSessionState();
+    String safeGetString(const String& str);
+    void safeSetString(String& target, const String& value);
 
     bool webServerInitialized;
     bool otaInitialized;

@@ -3,15 +3,28 @@
 namespace {
 RTC_DATA_ATTR uint32_t rtcPowerStateMagic = 0;
 RTC_DATA_ATTR bool rtcPowerState = true;
+
+RTC_DATA_ATTR uint32_t rtcLightStateMagic = 0;
+RTC_DATA_ATTR bool rtcLightState = false;
+
 constexpr uint32_t RTC_POWER_STATE_MAGIC = 0x4D445057;
+constexpr uint32_t RTC_LIGHT_STATE_MAGIC = 0x4C494748;
+}
+
+// ISR cho Nút bật/tắt đèn cứng
+void IRAM_ATTR isrBtnLight() {
+    controlLogic.handleInterruptBtnLight();
 }
 
 ControlLogic controlLogic;
 
 ControlLogic::ControlLogic() :
     currentPowerBoxState((rtcPowerStateMagic == RTC_POWER_STATE_MAGIC) ? rtcPowerState : true),
+    currentLightState((rtcLightStateMagic == RTC_LIGHT_STATE_MAGIC) ? rtcLightState : false),
+    interruptBtnLightTriggered(false),
     activeRelayPin(0), relayTriggerTime(0), isRelayActive(false),
     currentHour(-1), currentMin(-1) {
+    timeMutex = xSemaphoreCreateMutex();
 }
 
 void ControlLogic::begin() {
@@ -36,8 +49,11 @@ void ControlLogic::initGPIO() {
     pinMode(PIN_RELAY_DOWN, OUTPUT);
     pinMode(PIN_RELAY_STOP, OUTPUT);
     latchPowerRelay(currentPowerBoxState);
+    latchLightRelay(currentLightState);
 
-    // Pin Nguồn Tổng sẽ được setup ở loadPersistedState()
+    // Cấu hình Nút bấm cứng Đèn
+    pinMode(PIN_BTN_LIGHT, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(PIN_BTN_LIGHT), isrBtnLight, FALLING);
 }
 
 void ControlLogic::loadPersistedState() {
@@ -45,12 +61,16 @@ void ControlLogic::loadPersistedState() {
 
     // Sử dụng lại namespace và key cũ ("mydoor" / "box_power") để tương thích
     currentPowerBoxState = preferences.getBool("box_power", currentPowerBoxState);
+    currentLightState = preferences.getBool("light_state", currentLightState);
     preferences.end();
 
     // Gán trạng thái vào Relay ngay lập tức
     latchPowerRelay(currentPowerBoxState);
+    latchLightRelay(currentLightState);
 
-    Serial.printf("[CONTROL] Da khoi tao Zero-Glitch. Nguon Box Cua: %s\n", currentPowerBoxState ? "ON" : "OFF");
+    Serial.printf("[CONTROL] Da khoi tao Zero-Glitch. Nguon Box Cua: %s, Den: %s\n",
+                  currentPowerBoxState ? "ON" : "OFF",
+                  currentLightState ? "ON" : "OFF");
 }
 
 void ControlLogic::savePowerBoxState(bool state) {
@@ -66,11 +86,32 @@ void ControlLogic::savePowerBoxState(bool state) {
     }
 }
 
+void ControlLogic::saveLightState(bool state) {
+    if (currentLightState != state) {
+        currentLightState = state;
+        latchLightRelay(state);
+
+        preferences.begin("mydoor", false);
+        preferences.putBool("light_state", state);
+        preferences.end();
+
+        Serial.printf("[CONTROL] (Flash Saved) Trang thai Den thay doi: %s\n", state ? "ON" : "OFF");
+    }
+}
+
 void ControlLogic::latchPowerRelay(bool state) {
     rtcPowerStateMagic = RTC_POWER_STATE_MAGIC;
     rtcPowerState = state;
     digitalWrite(PIN_RELAY_POWER, state ? POWER_ON : POWER_OFF);
     pinMode(PIN_RELAY_POWER, OUTPUT);
+}
+
+void ControlLogic::latchLightRelay(bool state) {
+    rtcLightStateMagic = RTC_LIGHT_STATE_MAGIC;
+    rtcLightState = state;
+    // Relay đèn giả định kích mức thấp (LOW = ON) như Relay cửa
+    digitalWrite(PIN_RELAY_LIGHT, state ? RELAY_ON : RELAY_OFF);
+    pinMode(PIN_RELAY_LIGHT, OUTPUT);
 }
 
 void ControlLogic::togglePowerBox(bool turnOn) {
@@ -81,10 +122,24 @@ bool ControlLogic::isPowerBoxOn() {
     return currentPowerBoxState;
 }
 
+void ControlLogic::toggleLight(bool turnOn) {
+    saveLightState(turnOn);
+}
+
+bool ControlLogic::isLightOn() {
+    return currentLightState;
+}
+
+void ControlLogic::handleInterruptBtnLight() {
+    interruptBtnLightTriggered = true;
+}
+
 void ControlLogic::executeRemoteCommand(RemoteCommand cmd) {
     // Nhận lệnh từ Task Network (Core 0), đưa vào Queue để Core 1 xử lý
     if (commandQueue != NULL) {
-        xQueueSend(commandQueue, &cmd, 0);
+        if (xQueueSend(commandQueue, &cmd, 0) != pdTRUE) {
+            Serial.println("[LOI] Command Queue Day! Khong the xu ly lenh.");
+        }
     }
 }
 
@@ -111,6 +166,12 @@ void ControlLogic::processPendingCommand() {
             case CMD_STOP:
                 triggerRelay(PIN_RELAY_STOP);
                 break;
+            case CMD_LIGHT_ON:
+                toggleLight(true);
+                break;
+            case CMD_LIGHT_OFF:
+                toggleLight(false);
+                break;
             default:
                 break;
         }
@@ -126,13 +187,27 @@ void ControlLogic::triggerRelay(uint8_t pin) {
 }
 
 void ControlLogic::setLocalTime(int hour, int min) {
-    currentHour = hour;
-    currentMin = min;
+    if (xSemaphoreTake(timeMutex, portMAX_DELAY)) {
+        currentHour = hour;
+        currentMin = min;
+        xSemaphoreGive(timeMutex);
+    }
+}
+
+void ControlLogic::getLocalTimeSafe(int& hour, int& min) {
+    if (xSemaphoreTake(timeMutex, portMAX_DELAY)) {
+        hour = currentHour;
+        min = currentMin;
+        xSemaphoreGive(timeMutex);
+    }
 }
 
 void ControlLogic::checkDailyReboot() {
+    int h, m;
+    getLocalTimeSafe(h, m);
+
     // Khởi động lại hệ thống vào lúc 03:00 sáng
-    if (currentHour == DAILY_REBOOT_HOUR && currentMin == 0 && !isRelayActive) {
+    if (h == DAILY_REBOOT_HOUR && m == 0 && !isRelayActive) {
         Serial.println("\n[MAINTENANCE] Dang thuc hien Daily Reboot luc 3:00 AM...");
         delay(1000);
         ESP.restart();
@@ -149,6 +224,16 @@ void ControlLogic::monitorHeap() {
 }
 
 void ControlLogic::loop() {
+    // Xử lý Ngắt Nút Nhấn Đèn (Debounce cơ bản trong Loop)
+    if (interruptBtnLightTriggered) {
+        interruptBtnLightTriggered = false;
+        delay(50); // Simple debounce
+        if (digitalRead(PIN_BTN_LIGHT) == LOW) {
+            toggleLight(!currentLightState);
+            Serial.printf("[CONTROL] Nut nhan Den duoc an. Trang thai moi: %s\n", currentLightState ? "ON" : "OFF");
+        }
+    }
+
     // 1. Tự động nhả Relay sau DOOR_PULSE_MS
     if (isRelayActive && (millis() - relayTriggerTime >= DOOR_PULSE_MS)) {
         digitalWrite(activeRelayPin, RELAY_OFF);
