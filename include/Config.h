@@ -87,7 +87,7 @@
 #define AP_LOCKOUT_MS      1800000// 30 phút khóa AP nếu nhập sai 5 lần (ms)
 
 // Mật khẩu mặc định xuất xưởng (First Boot)
-#define DEFAULT_RESCUE_AP_SSID "HomeSmartbyMinh"
+#define DEFAULT_RESCUE_AP_SSID "SmartHomebyMinh"
 #define DEFAULT_RESCUE_AP_PASS "04011998"
 
 // Ngưỡng thời gian Reset cứng (ms)
