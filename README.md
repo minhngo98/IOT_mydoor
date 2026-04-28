@@ -33,8 +33,10 @@ MyDoor IoT là Firmware cấp công nghiệp (Professional Grade) điều khiể
   - Tự động bỏ qua hàm kiểm tra tràn RAM (`monitorHeap`) khi đang thực hiện OTA, chống nguy cơ thiết bị treo giữa chừng làm hỏng Firmware.
 - **Quản lý NVS Coexistence (Bảo vệ Flash)**: 
   - Cấu hình WiFi fallback và trạng thái Relay luôn được lưu độc lập qua `Preferences` (của Arduino), tách biệt với vùng NVS dành cho PKI certs của ESP RainMaker. Khi đổi Firmware, trạng thái cửa và mạng không bị xóa.
-- **Tự phục hồi (Self-Healing)**: Tích hợp Hardware Watchdog (8s), Daily Reboot (3 AM), giám sát RAM (Reboot nếu Free Heap < 20KB).
-- **Web Server Bất Đồng Bộ (Non-blocking WebUI)**:
+- **Bảo mật & Quản lý Mạng Khẩn cấp**: 
+  - Khôi phục mạng khẩn cấp (Rescue AP): Khi mất kết nối WiFi 5 phút, thiết bị sẽ tự động phát sóng WiFi ảo (đối với bản Blynk) hoặc tự bật lại BLE Provisioning (đối với bản RainMaker) để người dùng cài đặt mạng.
+  - Tự động tắt chế độ Khẩn cấp (Rescue AP / BLE) nếu đường truyền Internet được khôi phục trở lại, đảm bảo an ninh cho hệ thống.
+  - Bắt buộc thiết lập tài khoản Admin ở lần đầu (First Boot Setup).
   - 100% API của Captive Portal hoạt động bằng Cờ Trạng Thái (Flags). Không sử dụng hàm `delay()` trong Callback, tránh hiện tượng DDoS hoặc treo luồng `async_tcp`.
   - Rate Limiting: Khóa cổng cấu hình 30 phút nếu nhập sai mật khẩu Admin 5 lần.
 

@@ -818,10 +818,12 @@ void NetworkManager::setupWebServer() {
 
       request->send(200, "text/plain", "OK");
 
+#ifndef USE_RAINMAKER
       if (netManager.isApMode) {
         netManager.pendingReboot = true;
         netManager.rebootTime = millis();
       }
+#endif
     } else request->send(400, "text/plain", "Bad Request");
   });
 
@@ -1210,18 +1212,25 @@ void NetworkManager::handleBlynk() {
 }
 
 void NetworkManager::handleWiFi() {
-  if (isApMode) {
-    isConnected = false;
-    return;
-  }
-
   if (WiFi.status() == WL_CONNECTED) {
     isConnected = true;
     wifiLostFlag = false;
+
+    if (isApMode) {
+        Serial.println("[WIFI] Co mang tro lai. Dang tat Rescue AP...");
+        WiFi.softAPdisconnect(true);
+        isApMode = false;
+        WiFi.mode(WIFI_STA);
+    }
     return;
   }
 
   isConnected = false;
+
+  if (isApMode) {
+      // Đang ở AP mode và chưa có mạng, chờ checkAPCycle lo việc tắt AP
+      return;
+  }
 
   if (!wifiLostFlag) {
       wifiLostFlag = true;
@@ -1245,15 +1254,9 @@ void NetworkManager::handleWiFi() {
     trySecondary = !trySecondary;
   }
 
-  if (wifiLostFlag && millis() - wifiLostTime >= 300000 && !isApMode) {
+  if (wifiLostFlag && millis() - wifiLostTime >= 300000) {
       Serial.println("[AP] Mat ket noi 5 phut, tu dong bat Rescue AP!");
       setupAP();
-  }
-
-  // Nếu đang ở AP mode nhưng lại có connection STA được khôi phục ngầm (WIFI_AP_STA), tắt cờ lost
-  if (isApMode && WiFi.status() == WL_CONNECTED) {
-      isConnected = true;
-      wifiLostFlag = false;
   }
 }
 
@@ -1355,5 +1358,6 @@ void NetworkManager::loop() {
   // Gọi checkAPCycle mỗi vòng lặp bất kể chế độ
 #ifndef USE_RAINMAKER
   checkAPCycle();
+  handleWiFi();
 #endif
-}
+  handleBlynk();
