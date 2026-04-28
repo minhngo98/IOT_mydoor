@@ -45,10 +45,26 @@ MyDoor IoT là Firmware cấp công nghiệp (Professional Grade) điều khiể
 Sơ đồ nguyên lý toàn bộ hệ thống được thiết kế bằng QElectroTech. Xem chi tiết tại `docs/alll_diagram_electric.svg`.
 
 <p align="center">
-  <img src="docs/all_diagram_electric.svg" width="100%" alt="Sơ đồ nguyên lý MyDoor IoT">
+  <img src="docs/alll_diagram_electric.svg" width="100%" alt="Sơ đồ nguyên lý MyDoor IoT">
 </p>
 
-*Tham khảo chi tiết về luồng xử lý và phân bổ Core tại tài liệu [Software Architecture](docs/software_architecture.md).*
+*luồng xử lý và phân bổ Core tại tài liệu [Software Architecture](docs/software_architecture.md).*
+```mermaid
+sequenceDiagram
+    participant User as Người dùng (App/Web)
+    participant Core0 as Core 0 (NetworkManager)
+    participant Core1 as Core 1 (ControlLogic)
+    participant Hardware as Relay/NVS
+    
+    User->>Core0: Gửi lệnh MỞ CỬA (Blynk/HTTP)
+    Core0->>Core1: Push lệnh CMD_UP vào commandQueue
+    Core0->>Core0: logEvent("Cua: LEN") -> Buffer
+    Core1->>Core1: Pull lệnh từ Queue
+    Core1->>Hardware: Pull LOW GPIO 25 (500ms)
+    Hardware-->>Core1: Hoàn thành xung (Nhả Relay)
+    Core1->>Core0: Yêu cầu đẩy trạng thái mới (pushBlynkState)
+    Core0->>User: Cập nhật Dashboard & App
+```
 
 ---
 
