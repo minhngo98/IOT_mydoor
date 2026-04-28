@@ -23,12 +23,13 @@ ControlLogic::ControlLogic() :
     currentLightState((rtcLightStateMagic == RTC_LIGHT_STATE_MAGIC) ? rtcLightState : false),
     interruptBtnLightTriggered(false),
     activeRelayPin(0), relayTriggerTime(0), isRelayActive(false),
-    currentHour(-1), currentMin(-1) {
-    timeMutex = xSemaphoreCreateMutex();
+    currentHour(-1), currentMin(-1), timeMutex(NULL), commandQueue(NULL) {
 }
 
 void ControlLogic::begin() {
-    commandQueue = xQueueCreate(5, sizeof(RemoteCommand));
+    if (timeMutex == NULL) timeMutex = xSemaphoreCreateMutex();
+    if (commandQueue == NULL) commandQueue = xQueueCreate(5, sizeof(RemoteCommand));
+
     initGPIO();
     loadPersistedState();
 }
@@ -215,6 +216,8 @@ void ControlLogic::checkDailyReboot() {
 }
 
 void ControlLogic::monitorHeap() {
+    if (netManager.isOtaRunning) return;
+
     uint32_t freeHeap = ESP.getFreeHeap();
     if (freeHeap < MIN_FREE_HEAP) {
         Serial.printf("\n[CRITICAL] Free Heap qua thap (%d bytes)! Dang Reboot bao ve RAM...\n", freeHeap);

@@ -159,20 +159,30 @@ const char* index_html = R"rawliteral(
                 </div>
 
                 <hr style="border: 0; border-top: 1px dashed var(--border); margin: 20px 0;">
-                <label style="font-weight: 600; color: var(--primary); margin-bottom: 10px; display: block;">Cấu Hình Blynk IoT</label>
+                <label style="font-weight: 600; color: var(--primary); margin-bottom: 10px; display: block;">Cấu Hình Đám Mây (Cloud)</label>
 
-                <div class="form-group">
-                    <label for="blynk_tmpl">Blynk Template ID</label>
-                    <input type="text" id="blynk_tmpl" name="blynk_tmpl" placeholder="VD: TMPLxxxxxx">
+#ifdef USE_BLYNK
+                <div id="blynkFields">
+                    <div class="form-group">
+                        <label for="blynkTemplate">Blynk Template ID</label>
+                        <input type="text" id="blynkTemplate" name="blynkTemplate" placeholder="VD: TMPLxxxxxx">
+                    </div>
+                    <div class="form-group">
+                        <label for="blynkName">Blynk Template Name</label>
+                        <input type="text" id="blynkName" name="blynkName" placeholder="VD: MyDoor">
+                    </div>
+                    <div class="form-group">
+                        <label for="blynkAuth">Blynk Auth Token</label>
+                        <input type="text" id="blynkAuth" name="blynkAuth" placeholder="Chuỗi mã Token 32 ký tự">
+                    </div>
                 </div>
-                <div class="form-group">
-                    <label for="blynk_name">Blynk Template Name</label>
-                    <input type="text" id="blynk_name" name="blynk_name" placeholder="VD: MyDoor">
+#endif
+#ifdef USE_RAINMAKER
+                <div id="rainmakerInfo" style="padding: 15px; background: #e0f2fe; border-left: 4px solid #3b82f6; border-radius: 4px; margin-bottom: 15px; font-size: 0.95rem;">
+                    <strong>Đang chạy ESP RainMaker</strong><br>
+                    Cấu hình WiFi phía trên sẽ được dùng làm dự phòng. Vui lòng sử dụng <b>App ESP RainMaker</b> trên điện thoại để Thêm thiết bị (Provisioning qua Bluetooth).
                 </div>
-                <div class="form-group">
-                    <label for="blynk_auth">Blynk Auth Token</label>
-                    <input type="text" id="blynk_auth" name="blynk_auth" placeholder="Chuỗi mã Token 32 ký tự">
-                </div>
+#endif
 
                 <button type="submit" class="btn" id="btnSaveWifi">Lưu WiFi & Cloud</button>
             </form>
@@ -197,15 +207,15 @@ const char* index_html = R"rawliteral(
                 <div class="form-group">
                     <label>Giờ Bật Nguồn (Ví dụ: Sáng dậy)</label>
                     <div class="time-flex">
-                        <select id="on_hour" name="on_hour"></select>
-                        <select id="on_min" name="on_min"></select>
+                        <select id="onHour" name="onHour"></select>
+                        <select id="onMin" name="onMin"></select>
                     </div>
                 </div>
                 <div class="form-group">
                     <label>Giờ Tắt Nguồn (Ví dụ: Đi ngủ)</label>
                     <div class="time-flex">
-                        <select id="off_hour" name="off_hour"></select>
-                        <select id="off_min" name="off_min"></select>
+                        <select id="offHour" name="offHour"></select>
+                        <select id="offMin" name="offMin"></select>
                     </div>
                 </div>
                 <div class="form-group">
@@ -337,13 +347,17 @@ const char* index_html = R"rawliteral(
 
             let hourHTML = '';
             for(let i=0; i<24; i++) hourHTML += `<option value="${i}">${i < 10 ? '0'+i : i}</option>`;
-            document.getElementById('on_hour').innerHTML = hourHTML;
-            document.getElementById('off_hour').innerHTML = hourHTML;
+            document.getElementById('onHour').innerHTML = hourHTML;
+            document.getElementById('offHour').innerHTML = hourHTML;
+            document.getElementById('lightOnHour').innerHTML = hourHTML;
+            document.getElementById('lightOffHour').innerHTML = hourHTML;
 
             let minHTML = '';
             for(let i=0; i<60; i++) minHTML += `<option value="${i}">${i < 10 ? '0'+i : i}</option>`;
-            document.getElementById('on_min').innerHTML = minHTML;
-            document.getElementById('off_min').innerHTML = minHTML;
+            document.getElementById('onMin').innerHTML = minHTML;
+            document.getElementById('offMin').innerHTML = minHTML;
+            document.getElementById('lightOnMin').innerHTML = minHTML;
+            document.getElementById('lightOffMin').innerHTML = minHTML;
         }
         initSelects();
 
@@ -351,17 +365,17 @@ const char* index_html = R"rawliteral(
         async function loadDeviceConfig() {
             const data = await fetch('/get_config').then(r => r.json());
             document.getElementById('timezone').value = data.timezone !== undefined ? data.timezone : 7;
-            document.getElementById('on_hour').value = data.on_hour;
-            document.getElementById('on_min').value = data.on_min;
-            document.getElementById('off_hour').value = data.off_hour;
-            document.getElementById('off_min').value = data.off_min;
-            document.getElementById('l_on_hour').value = data.l_on_hour;
-            document.getElementById('l_on_min').value = data.l_on_min;
-            document.getElementById('l_off_hour').value = data.l_off_hour;
-            document.getElementById('l_off_min').value = data.l_off_min;
-            document.getElementById('blynk_tmpl').value = data.blynk_tmpl || '';
-            document.getElementById('blynk_name').value = data.blynk_name || '';
-            document.getElementById('blynk_auth').value = data.blynk_auth || '';
+            document.getElementById('onHour').value = data.onHour;
+            document.getElementById('onMin').value = data.onMin;
+            document.getElementById('offHour').value = data.offHour;
+            document.getElementById('offMin').value = data.offMin;
+            document.getElementById('lightOnHour').value = data.lightOnHour;
+            document.getElementById('lightOnMin').value = data.lightOnMin;
+            document.getElementById('lightOffHour').value = data.lightOffHour;
+            document.getElementById('lightOffMin').value = data.lightOffMin;
+            document.getElementById('blynkTemplate').value = data.blynkTemplate || '';
+            document.getElementById('blynkName').value = data.blynkName || '';
+            document.getElementById('blynkAuth').value = data.blynkAuth || '';
             document.getElementById('rescueSsid').textContent = data.rescue_ssid || '-';
             document.getElementById('rescuePassMask').textContent = data.rescue_pass_mask || '-';
             document.getElementById('otaUser').textContent = data.ota_user || '-';
@@ -370,8 +384,8 @@ const char* index_html = R"rawliteral(
             for(let i=0; i<7; i++) {
                 const day = document.querySelector(`input[name="day_${i}"]`);
                 day.checked = !!(data.days && (data.days & (1 << i)));
-                const l_day = document.querySelector(`input[name="l_day_${i}"]`);
-                l_day.checked = !!(data.l_days && (data.l_days & (1 << i)));
+                const lightScheduleDays = document.querySelector(`input[name="lightScheduleDays_${i}"]`);
+                if (lightScheduleDays) lightScheduleDays.checked = !!(data.lightScheduleDays && (data.lightScheduleDays & (1 << i)));
             }
 
             updateStatus(); // Gọi ngay 1 lần lúc đầu

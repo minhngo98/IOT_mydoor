@@ -11,6 +11,10 @@
 #include "BlynkSimpleEsp32_SSL_Bounded.h"
 #endif
 
+#ifdef USE_RAINMAKER
+static const char *TAG = "RainMakerManager";
+#endif
+
 // Do lỗi macro trùng lặp HTTP_GET/POST giữa AsyncWebServer và thư viện WebServer (của ElegantOTA),
 // ta dùng trực tiếp webrequestmethod
 #define ASYNC_GET HTTP_GET
@@ -95,8 +99,16 @@ NetworkManager::NetworkManager() : server(80), isApMode(false), isConnected(fals
   failedAuthCount(0), lockoutStartTime(0), isLockedOut(false), interruptConfigTriggered(false),
   interruptResetTriggered(false), claimRequired(false), webServerInitialized(false), isFirstBoot(false),
   otaInitialized(false), lastBlynkConnectAttempt(0), blynkReconnectBackoffMs(BLYNK_RECONNECT_BASE_MS),
-  blynkRemoteGuardUntil(0), blynkWasConnected(false), blynkInvalidToken(false), logIndex(0) {
-    stringMutex = xSemaphoreCreateMutex();
+  blynkRemoteGuardUntil(0), blynkWasConnected(false), blynkInvalidToken(false), logIndex(0), lastBlynkSyncLogIndex(0), isOtaRunning(false), pendingReboot(false), rebootTime(0) {
+    stringMutex = NULL;
+#ifdef USE_RAINMAKER
+    rainmakerNode = NULL;
+    doorDevice = NULL;
+    powerBoxDevice = NULL;
+    lightDevice = NULL;
+    rainmakerInitialized = false;
+    wifiEventGroup = xEventGroupCreate();
+#endif
 }
 
 String NetworkManager::safeGetString(const String& str) {
@@ -136,15 +148,35 @@ void NetworkManager::logEvent(const String& message) {
     if (xSemaphoreTake(stringMutex, portMAX_DELAY)) {
         eventLogs[logIndex] = logLine;
         logIndex = (logIndex + 1) % 15;
+        // Nếu vòng ring buffer đè lên dữ liệu chưa sync, phải tăng lastSync để đuổi theo
+        if (logIndex == lastBlynkSyncLogIndex) {
+            lastBlynkSyncLogIndex = (lastBlynkSyncLogIndex + 1) % 15;
+        }
         xSemaphoreGive(stringMutex);
     }
+}
 
-    // 4. Gửi lên Blynk Terminal (V4)
+void NetworkManager::syncLogsToCloud() {
+    if (lastBlynkSyncLogIndex == logIndex) return; // Không có log mới
+
+    if (xSemaphoreTake(stringMutex, portMAX_DELAY)) {
+        while (lastBlynkSyncLogIndex != logIndex) {
+            String logLine = eventLogs[lastBlynkSyncLogIndex];
+
+            // Gửi lên Cloud
 #ifdef USE_BLYNK
-    if (Blynk.connected()) {
-        Blynk.virtualWrite(VPIN_TERMINAL, logLine + "\n");
-    }
+            if (Blynk.connected()) {
+                Blynk.virtualWrite(VPIN_TERMINAL, logLine + "\n");
+            }
 #endif
+#ifdef USE_RAINMAKER
+            // Future: push logs to RainMaker
+#endif
+
+            lastBlynkSyncLogIndex = (lastBlynkSyncLogIndex + 1) % 15;
+        }
+        xSemaphoreGive(stringMutex);
+    }
 }
 
 String NetworkManager::getRecentLogs() const {
@@ -175,6 +207,10 @@ void NetworkManager::handleInterruptReset() {
 }
 
 void NetworkManager::begin() {
+  if (stringMutex == NULL) {
+      stringMutex = xSemaphoreCreateMutex();
+  }
+
   pinMode(PIN_BTN_CONFIG, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(PIN_BTN_CONFIG), isr_config_button, FALLING);
 
@@ -182,6 +218,27 @@ void NetworkManager::begin() {
   attachInterrupt(digitalPinToInterrupt(PIN_BTN_RESET), isr_reset_button, FALLING);
   loadConfig();
 
+#ifdef USE_RAINMAKER
+  esp_err_t ret = nvs_flash_init();
+  if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+      ESP_ERROR_CHECK(nvs_flash_erase());
+      ret = nvs_flash_init();
+  }
+  ESP_ERROR_CHECK(ret);
+
+  ESP_ERROR_CHECK(esp_event_loop_create_default());
+  ESP_ERROR_CHECK(esp_netif_init());
+  ESP_ERROR_CHECK(esp_wifi_init());
+
+  ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
+  ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL));
+  ESP_ERROR_CHECK(esp_event_handler_register(RMAKER_EVENT, ESP_EVENT_ANY_ID, &rainmaker_event_handler, NULL));
+
+  setupRainMaker();
+  startRainMakerProvisioning();
+#endif
+
+#ifndef USE_RAINMAKER
   // Mạng WiFi chưa được thiết lập, chạy chế độ Access Point
   if (ssid == "" || isFirstBoot) {
     Serial.println("[WIFI] Thiet bi chua san sang van hanh day du. Vao Rescue AP (10.10.10.1)...");
@@ -189,6 +246,9 @@ void NetworkManager::begin() {
   } else {
     setupSTA();
   }
+#endif
+
+  setupWebServer();
 }
 
 void NetworkManager::loadConfig() {
@@ -207,9 +267,9 @@ void NetworkManager::loadConfig() {
   adminUser = preferences.getString("admin_user", "");
   adminPass = preferences.getString("admin_pass", "");
 
-  blynkTemplate = preferences.getString("blynk_tmpl", "");
-  blynkName = preferences.getString("blynk_name", "");
-  blynkAuth = preferences.getString("blynk_auth", "");
+  blynkTemplate = preferences.getString("blynkTemplate", "");
+  blynkName = preferences.getString("blynkName", "");
+  blynkAuth = preferences.getString("blynkAuth", "");
 
   rescueApSsid = preferences.getString("rescue_ssid", "");
   if (rescueApSsid == "") {
@@ -226,17 +286,17 @@ void NetworkManager::loadConfig() {
   }
 
   timezone = preferences.getChar("timezone", 7); // Mặc định UTC+7
-  onHour = preferences.getUChar("on_hour", 6); // Mặc định bật 6h sáng
-  onMin = preferences.getUChar("on_min", 0);
-  offHour = preferences.getUChar("off_hour", 23); // Tắt 23h đêm
-  offMin = preferences.getUChar("off_min", 0);
+  onHour = preferences.getUChar("onHour", 6); // Mặc định bật 6h sáng
+  onMin = preferences.getUChar("onMin", 0);
+  offHour = preferences.getUChar("offHour", 23); // Tắt 23h đêm
+  offMin = preferences.getUChar("offMin", 0);
   scheduleDays = preferences.getUChar("days", 127); // Mặc định cả tuần (1111111 = 127)
 
-  lightOnHour = preferences.getUChar("l_on_hour", 18); // Đèn bật 18h tối
-  lightOnMin = preferences.getUChar("l_on_min", 0);
-  lightOffHour = preferences.getUChar("l_off_hour", 5); // Đèn tắt 5h sáng
-  lightOffMin = preferences.getUChar("l_off_min", 0);
-  lightScheduleDays = preferences.getUChar("l_days", 127);
+  lightOnHour = preferences.getUChar("l_onHour", 18); // Đèn bật 18h tối
+  lightOnMin = preferences.getUChar("l_onMin", 0);
+  lightOffHour = preferences.getUChar("l_offHour", 5); // Đèn tắt 5h sáng
+  lightOffMin = preferences.getUChar("l_offMin", 0);
+  lightScheduleDays = preferences.getUChar("lightScheduleDays", 127);
 
   // Xử lý cờ First Boot và tương thích ngược
   if (ssid == "") {
@@ -330,6 +390,169 @@ void NetworkManager::setupSTA() {
   configTime(timezone * 3600, 0, "pool.ntp.org", "time.nist.gov");
 }
 
+#ifdef USE_RAINMAKER
+void NetworkManager::setupRainMaker() {
+    if (rainmakerInitialized) return;
+
+    esp_rmaker_config_t rmaker_config = {
+        .enable_time_sync = true,
+    };
+    rainmakerNode = esp_rmaker_node_init(&rmaker_config, "MyDoor", "ESP32 Door Control");
+    if (!rainmakerNode) {
+        ESP_LOGE(TAG, "Could not initialise RainMaker node.");
+        return;
+    }
+
+    doorDevice = esp_rmaker_device_create("door-control", "Door Control", NULL);
+    if(doorDevice) {
+        esp_rmaker_device_add_cb(doorDevice, write_cb_wrapper, (void*)0x00);
+        esp_rmaker_node_add_device(rainmakerNode, doorDevice);
+
+        esp_rmaker_param_t *door_up_param = esp_rmaker_param_create("up", RMakerParamType_Bool, rm_false());
+        esp_rmaker_param_add_ui_type(door_up_param, RMAKER_UI_BUTTON);
+        esp_rmaker_device_add_param(doorDevice, door_up_param);
+
+        esp_rmaker_param_t *door_down_param = esp_rmaker_param_create("down", RMakerParamType_Bool, rm_false());
+        esp_rmaker_param_add_ui_type(door_down_param, RMAKER_UI_BUTTON);
+        esp_rmaker_device_add_param(doorDevice, door_down_param);
+
+        esp_rmaker_param_t *door_stop_param = esp_rmaker_param_create("stop", RMakerParamType_Bool, rm_false());
+        esp_rmaker_param_add_ui_type(door_stop_param, RMAKER_UI_BUTTON);
+        esp_rmaker_device_add_param(doorDevice, door_stop_param);
+
+        esp_rmaker_param_t *door_state_param = esp_rmaker_param_create("state", RMakerParamType_String, rm_str("STOPPED"));
+        esp_rmaker_param_add_ui_type(door_state_param, RMAKER_UI_TEXT);
+        esp_rmaker_param_set_flags(door_state_param, READ_ACCESS);
+        esp_rmaker_device_add_param(doorDevice, door_state_param);
+    }
+
+    powerBoxDevice = esp_rmaker_switch_device_create("power-box", "Power Box", controlLogic.isPowerBoxOn());
+    if(powerBoxDevice) {
+        esp_rmaker_device_add_cb(powerBoxDevice, write_cb_wrapper, (void*)0x01);
+        esp_rmaker_node_add_device(rainmakerNode, powerBoxDevice);
+    }
+
+    lightDevice = esp_rmaker_switch_device_create("light", "Light Control", controlLogic.isLightOn());
+    if(lightDevice) {
+        esp_rmaker_device_add_cb(lightDevice, write_cb_wrapper, (void*)0x02);
+        esp_rmaker_node_add_device(rainmakerNode, lightDevice);
+    }
+
+    esp_rmaker_start();
+    rainmakerInitialized = true;
+    ESP_LOGI(TAG, "RainMaker initialized and started.");
+}
+
+void NetworkManager::startRainMakerProvisioning() {
+    ESP_ERROR_CHECK(esp_wifi_start());
+    esp_rmaker_start_provisioning(RMAKER_PROV_BLE, NULL, NULL);
+    ESP_LOGI(TAG, "RainMaker BLE provisioning started.");
+}
+
+void NetworkManager::stopRainMakerProvisioning() {
+    esp_rmaker_stop_provisioning();
+    ESP_LOGI(TAG, "RainMaker provisioning stopped.");
+}
+
+void NetworkManager::pushRainMakerState() {
+    if (!rainmakerInitialized || !esp_rmaker_is_connected()) return;
+
+    esp_rmaker_param_update_and_report(
+        esp_rmaker_device_get_param_by_name(powerBoxDevice, "power"),
+        controlLogic.isPowerBoxOn() ? rm_true() : rm_false()
+    );
+
+    esp_rmaker_param_update_and_report(
+        esp_rmaker_device_get_param_by_name(lightDevice, "power"),
+        controlLogic.isLightOn() ? rm_true() : rm_false()
+    );
+
+    // TODO: Connect this to actual door state feedback when implemented in ControlLogic
+    esp_rmaker_param_update_and_report(
+        esp_rmaker_device_get_param_by_name(doorDevice, "state"),
+        rm_str("STOPPED")
+    );
+}
+
+esp_err_t NetworkManager::write_cb_wrapper(const rm_param_val_t val, void *priv_data) {
+    uint32_t device_id = (uint32_t)priv_data;
+    esp_rmaker_param_t *param = esp_rmaker_param_get_parent(esp_rmaker_param_get_parent(esp_rmaker_param_get_handle(val)));
+
+    if (!param) return ESP_FAIL;
+
+    if (device_id == 0x01) {
+        bool turnOn = rm_param_val_to_bool(val);
+        controlLogic.executeRemoteCommand(turnOn ? CMD_LIGHT_ON : CMD_LIGHT_OFF); // Reusing CMD structure, might need new specific ones or toggle
+        netManager.logEvent("Power Box: " + String(turnOn ? "ON" : "OFF") + " (RainMaker)");
+        controlLogic.togglePowerBox(turnOn);
+    } else if (device_id == 0x02) {
+        bool turnOn = rm_param_val_to_bool(val);
+        controlLogic.executeRemoteCommand(turnOn ? CMD_LIGHT_ON : CMD_LIGHT_OFF);
+        netManager.logEvent("Light: " + String(turnOn ? "ON" : "OFF") + " (RainMaker)");
+        controlLogic.toggleLight(turnOn);
+    } else if (device_id == 0x00) {
+        const char* param_name = esp_rmaker_param_get_name(param);
+        if (strcmp(param_name, "up") == 0 && rm_param_val_to_bool(val)) {
+            controlLogic.executeRemoteCommand(CMD_UP);
+            netManager.logEvent("Door: UP (RainMaker)");
+        } else if (strcmp(param_name, "down") == 0 && rm_param_val_to_bool(val)) {
+            controlLogic.executeRemoteCommand(CMD_DOWN);
+            netManager.logEvent("Door: DOWN (RainMaker)");
+        } else if (strcmp(param_name, "stop") == 0 && rm_param_val_to_bool(val)) {
+            controlLogic.executeRemoteCommand(CMD_STOP);
+            netManager.logEvent("Door: STOP (RainMaker)");
+        }
+        esp_rmaker_param_update_and_report(param, rm_false());
+    }
+    netManager.pushCloudState();
+    return ESP_OK;
+}
+
+void NetworkManager::rainmaker_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    if (RMAKER_EVENT == event_base) {
+        switch (event_id) {
+            case RMAKER_EVENT_MQTT_CONNECTED:
+                ESP_LOGI(TAG, "RainMaker: MQTT Connected.");
+                xEventGroupSetBits(netManager.wifiEventGroup, RM_MQTT_CONNECTED_BIT);
+                netManager.pushRainMakerState();
+                netManager.stopRainMakerProvisioning();
+                break;
+            case RMAKER_EVENT_MQTT_DISCONNECTED:
+                ESP_LOGI(TAG, "RainMaker: MQTT Disconnected.");
+                xEventGroupClearBits(netManager.wifiEventGroup, RM_MQTT_CONNECTED_BIT);
+                break;
+            case RMAKER_EVENT_FACTORY_RESET:
+                ESP_LOGW(TAG, "RainMaker: Factory Reset Initiated. Erasing NVS and restarting...");
+                xEventGroupSetBits(netManager.wifiEventGroup, RM_FACTORY_RESET_BIT);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+void NetworkManager::wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    if (event_base == WIFI_EVENT) {
+        if (event_id == WIFI_EVENT_STA_START) {
+            esp_wifi_connect();
+        } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
+            ESP_LOGI(TAG, "Wi-Fi Disconnected. Retrying...");
+            xEventGroupClearBits(netManager.wifiEventGroup, WIFI_CONNECTED_BIT);
+            netManager.isConnected = false;
+            esp_wifi_connect();
+        }
+    } else if (event_base == IP_EVENT) {
+        if (event_id == IP_EVENT_STA_GOT_IP) {
+            ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+            ESP_LOGI(TAG, "Wi-Fi Connected. IP: " IPSTR, IP2STR(&event->ip_info.ip));
+            xEventGroupSetBits(netManager.wifiEventGroup, WIFI_CONNECTED_BIT);
+            netManager.isConnected = true;
+            netManager.stopRainMakerProvisioning();
+        }
+    }
+}
+#endif
+
 bool NetworkManager::checkAuth(AsyncWebServerRequest *request) {
     if (adminUser == "" || adminPass == "") {
         request->send(503, "text/plain", "Device is not claimed yet.");
@@ -346,8 +569,9 @@ bool NetworkManager::checkAuth(AsyncWebServerRequest *request) {
             lockoutStartTime = millis();
             Serial.println("[SECURITY] Đã khóa truy cập AP 30 phút do sai Pass 5 lần!");
         } else {
-            // Chậm phản hồi 1 giây để chống Bruteforce
-            delay(1000);
+            // Chậm phản hồi 1 giây để chống Bruteforce bằng cách lưu thời gian sai trước (Tùy chọn)
+            // Hiện tại chúng ta sẽ trả về ngay hoặc nếu muốn delay thì delay non-blocking
+            // Nhưng đối với checkAuth thì tốt nhất ta chỉ ghi nhận đếm số lần sai và cho qua, vì đây là luồng async_tcp
         }
         request->requestAuthentication("MyDoor Config Admin");
         return false;
@@ -440,23 +664,27 @@ void NetworkManager::setupWebServer() {
     if (!netManager.checkAuth(request)) return;
 
     String json = "{\"timezone\":" + String(netManager.timezone) +
-                  ",\"on_hour\":" + String(netManager.onHour) +
-                  ",\"on_min\":" + String(netManager.onMin) +
-                  ",\"off_hour\":" + String(netManager.offHour) +
-                  ",\"off_min\":" + String(netManager.offMin) +
+                  ",\"onHour\":" + String(netManager.onHour) +
+                  ",\"onMin\":" + String(netManager.onMin) +
+                  ",\"offHour\":" + String(netManager.offHour) +
+                  ",\"offMin\":" + String(netManager.offMin) +
                   ",\"days\":" + String(netManager.scheduleDays) +
-                  ",\"l_on_hour\":" + String(netManager.lightOnHour) +
-                  ",\"l_on_min\":" + String(netManager.lightOnMin) +
-                  ",\"l_off_hour\":" + String(netManager.lightOffHour) +
-                  ",\"l_off_min\":" + String(netManager.lightOffMin) +
-                  ",\"l_days\":" + String(netManager.lightScheduleDays) +
+                  ",\"l_onHour\":" + String(netManager.lightOnHour) +
+                  ",\"l_onMin\":" + String(netManager.lightOnMin) +
+                  ",\"l_offHour\":" + String(netManager.lightOffHour) +
+                  ",\"l_offMin\":" + String(netManager.lightOffMin) +
+                  ",\"lightScheduleDays\":" + String(netManager.lightScheduleDays) +
                   ",\"device_id\":\"" + netManager.deviceId + "\"" +
-                  ",\"rescue_ssid\":\"" + netManager.safeGetString(netManager.rescueApSsid) + "\"" +
-                  ",\"blynk_tmpl\":\"" + maskBlynk(netManager.safeGetString(netManager.blynkTemplate)) + "\"" +
-                  ",\"blynk_name\":\"" + maskBlynk(netManager.safeGetString(netManager.blynkName)) + "\"" +
-                  ",\"blynk_auth\":\"" + maskBlynk(netManager.safeGetString(netManager.blynkAuth)) + "\"" +
-                  ",\"power_box_on\":" + (controlLogic.isPowerBoxOn() ? "true" : "false") +
-                  ",\"light_on\":" + (controlLogic.isLightOn() ? "true" : "false") + "}";
+                  ",\"rescue_ssid\":\"" + netManager.safeGetString(netManager.rescueApSsid) + "\"";
+
+#ifndef USE_RAINMAKER
+    json +=       ",\"blynkTemplate\":\"" + maskBlynk(netManager.safeGetString(netManager.blynkTemplate)) + "\"" +
+                  ",\"blynkName\":\"" + maskBlynk(netManager.safeGetString(netManager.blynkName)) + "\"" +
+                  ",\"blynkAuth\":\"" + maskBlynk(netManager.safeGetString(netManager.blynkAuth)) + "\"";
+#endif
+
+    json +=       ",\"power_box_on\":" + String(controlLogic.isPowerBoxOn() ? "true" : "false") +
+                  ",\"light_on\":" + String(controlLogic.isLightOn() ? "true" : "false") + "}";
     request->send(200, "application/json", json);
   });
 
@@ -480,23 +708,27 @@ void NetworkManager::setupWebServer() {
       saveStringIfChanged("pass", newPass);
       if(request->hasParam("ssid2", true)) saveStringIfChanged("ssid2", request->getParam("ssid2", true)->value());
       if(request->hasParam("pass2", true)) saveStringIfChanged("pass2", request->getParam("pass2", true)->value());
-      if(request->hasParam("blynk_tmpl", true)) {
-        String newVal = request->getParam("blynk_tmpl", true)->value();
-        if (newVal.length() > 0 && newVal.indexOf('*') == -1) saveStringIfChanged("blynk_tmpl", newVal);
+
+#ifndef USE_RAINMAKER
+      if(request->hasParam("blynkTemplate", true)) {
+        String newVal = request->getParam("blynkTemplate", true)->value();
+        if (newVal.length() > 0 && newVal.indexOf('*') == -1) saveStringIfChanged("blynkTemplate", newVal);
       }
-      if(request->hasParam("blynk_name", true)) {
-        String newVal = request->getParam("blynk_name", true)->value();
-        if (newVal.length() > 0 && newVal.indexOf('*') == -1) saveStringIfChanged("blynk_name", newVal);
+      if(request->hasParam("blynkName", true)) {
+        String newVal = request->getParam("blynkName", true)->value();
+        if (newVal.length() > 0 && newVal.indexOf('*') == -1) saveStringIfChanged("blynkName", newVal);
       }
-      if(request->hasParam("blynk_auth", true)) {
-        String newVal = request->getParam("blynk_auth", true)->value();
-        if (newVal.length() > 0 && newVal.indexOf('*') == -1) saveStringIfChanged("blynk_auth", newVal);
+      if(request->hasParam("blynkAuth", true)) {
+        String newVal = request->getParam("blynkAuth", true)->value();
+        if (newVal.length() > 0 && newVal.indexOf('*') == -1) saveStringIfChanged("blynkAuth", newVal);
       }
+#endif
 
       p.end();
 
       request->send(200, "text/plain", "OK");
-      delay(2000); ESP.restart();
+      netManager.pendingReboot = true;
+      netManager.rebootTime = millis();
     } else request->send(400, "text/plain", "Missing args");
   });
 
@@ -514,10 +746,10 @@ void NetworkManager::setupWebServer() {
     };
 
     if(request->hasParam("timezone", true)) saveCharIfChanged("timezone", request->getParam("timezone", true)->value().toInt());
-    if(request->hasParam("on_hour", true)) saveUCharIfChanged("on_hour", request->getParam("on_hour", true)->value().toInt());
-    if(request->hasParam("on_min", true))  saveUCharIfChanged("on_min", request->getParam("on_min", true)->value().toInt());
-    if(request->hasParam("off_hour", true)) saveUCharIfChanged("off_hour", request->getParam("off_hour", true)->value().toInt());
-    if(request->hasParam("off_min", true))  saveUCharIfChanged("off_min", request->getParam("off_min", true)->value().toInt());
+    if(request->hasParam("onHour", true)) saveUCharIfChanged("onHour", request->getParam("onHour", true)->value().toInt());
+    if(request->hasParam("onMin", true))  saveUCharIfChanged("onMin", request->getParam("onMin", true)->value().toInt());
+    if(request->hasParam("offHour", true)) saveUCharIfChanged("offHour", request->getParam("offHour", true)->value().toInt());
+    if(request->hasParam("offMin", true))  saveUCharIfChanged("offMin", request->getParam("offMin", true)->value().toInt());
 
     uint8_t days = 0;
     for(int i=0; i<7; i++) {
@@ -525,16 +757,16 @@ void NetworkManager::setupWebServer() {
     }
     saveUCharIfChanged("days", days);
 
-    if(request->hasParam("l_on_hour", true)) saveUCharIfChanged("l_on_hour", request->getParam("l_on_hour", true)->value().toInt());
-    if(request->hasParam("l_on_min", true))  saveUCharIfChanged("l_on_min", request->getParam("l_on_min", true)->value().toInt());
-    if(request->hasParam("l_off_hour", true)) saveUCharIfChanged("l_off_hour", request->getParam("l_off_hour", true)->value().toInt());
-    if(request->hasParam("l_off_min", true))  saveUCharIfChanged("l_off_min", request->getParam("l_off_min", true)->value().toInt());
+    if(request->hasParam("l_onHour", true)) saveUCharIfChanged("l_onHour", request->getParam("l_onHour", true)->value().toInt());
+    if(request->hasParam("l_onMin", true))  saveUCharIfChanged("l_onMin", request->getParam("l_onMin", true)->value().toInt());
+    if(request->hasParam("l_offHour", true)) saveUCharIfChanged("l_offHour", request->getParam("l_offHour", true)->value().toInt());
+    if(request->hasParam("l_offMin", true))  saveUCharIfChanged("l_offMin", request->getParam("l_offMin", true)->value().toInt());
 
-    uint8_t l_days = 0;
+    uint8_t lightScheduleDays = 0;
     for(int i=0; i<7; i++) {
-      if(request->hasParam("l_day_" + String(i), true)) l_days |= (1 << i);
+      if(request->hasParam("l_day_" + String(i), true)) lightScheduleDays |= (1 << i);
     }
-    saveUCharIfChanged("l_days", l_days);
+    saveUCharIfChanged("lightScheduleDays", lightScheduleDays);
 
     p.end();
 
@@ -589,9 +821,8 @@ void NetworkManager::setupWebServer() {
       request->send(200, "text/plain", "OK");
 
       if (netManager.isApMode) {
-        delay(250);
-        WiFi.softAPdisconnect(true);
-        netManager.setupAP();
+        netManager.pendingReboot = true;
+        netManager.rebootTime = millis();
       }
     } else request->send(400, "text/plain", "Bad Request");
   });
@@ -601,7 +832,8 @@ void NetworkManager::setupWebServer() {
     if (!netManager.checkAuth(request)) return;
 
     request->send(200, "text/plain", "Rebooting");
-    delay(1000); ESP.restart();
+    netManager.pendingReboot = true;
+    netManager.rebootTime = millis();
   });
 
   // API API Control Cửa (Up/Stop/Down)
@@ -638,7 +870,7 @@ void NetworkManager::setupWebServer() {
         bool turnOn = (state == "1" || state == "true");
         controlLogic.togglePowerBox(turnOn);
         netManager.logEvent("Nguon Box: " + String(turnOn ? "BAT" : "TAT") + " (WebUI)");
-        netManager.pushBlynkState();
+        netManager.pushCloudState();
 
         request->send(200, "text/plain", "OK");
     } else {
@@ -655,7 +887,7 @@ void NetworkManager::setupWebServer() {
         bool turnOn = (state == "1" || state == "true");
         controlLogic.toggleLight(turnOn);
         netManager.logEvent("Den: " + String(turnOn ? "BAT" : "TAT") + " (WebUI)");
-        netManager.pushBlynkState();
+        netManager.pushCloudState();
 
         request->send(200, "text/plain", "OK");
     } else {
@@ -671,6 +903,15 @@ void NetworkManager::setupWebServer() {
 
   // Khởi động ElegantOTA (/update) -> Nạp file .bin từ trình duyệt
   netManager.syncOtaAuth();
+
+  ElegantOTA.onStart([]() {
+      netManager.isOtaRunning = true;
+      Serial.println("[OTA] Bat dau upload, dung check RAM de tranh Brick!");
+  });
+  ElegantOTA.onEnd([](bool success) {
+      netManager.isOtaRunning = false;
+      Serial.println(success ? "[OTA] Hoan tat thanh cong." : "[OTA] Upload that bai.");
+  });
 
   server.begin();
   webServerInitialized = true;
@@ -769,12 +1010,12 @@ void NetworkManager::checkNTP() {
   if (scheduleActiveNow && !controlLogic.isPowerBoxOn()) {
       Serial.printf("[AUTO] %02d:%02d - Den gio mo Box Cua\n", timeinfo.tm_hour, timeinfo.tm_min);
       controlLogic.togglePowerBox(true);
-      pushBlynkState();
+      pushCloudState();
   }
   else if (!scheduleActiveNow && controlLogic.isPowerBoxOn()) {
       Serial.printf("[AUTO] %02d:%02d - Den gio dong Box Cua\n", timeinfo.tm_hour, timeinfo.tm_min);
       controlLogic.togglePowerBox(false);
-      pushBlynkState();
+      pushCloudState();
   }
 
   // Logic tự động bật/tắt Đèn (Relay 5)
@@ -783,13 +1024,22 @@ void NetworkManager::checkNTP() {
   if (lightScheduleActiveNow && !controlLogic.isLightOn()) {
       Serial.printf("[AUTO] %02d:%02d - Den gio bat Den\n", timeinfo.tm_hour, timeinfo.tm_min);
       controlLogic.toggleLight(true);
-      pushBlynkState();
+      pushCloudState();
   }
   else if (!lightScheduleActiveNow && controlLogic.isLightOn()) {
       Serial.printf("[AUTO] %02d:%02d - Den gio tat Den\n", timeinfo.tm_hour, timeinfo.tm_min);
       controlLogic.toggleLight(false);
-      pushBlynkState();
+      pushCloudState();
   }
+}
+
+void NetworkManager::pushCloudState() {
+#ifdef USE_BLYNK
+    pushBlynkState();
+#endif
+#ifdef USE_RAINMAKER
+    pushRainMakerState();
+#endif
 }
 
 void NetworkManager::pushBlynkState() {
@@ -845,26 +1095,26 @@ void NetworkManager::handleRemotePowerCommand(bool turnOn) {
 #ifdef USE_BLYNK
   if (!canAcceptRemoteCommands()) {
       Serial.println("[BLYNK] Bo qua lenh nguon do server dang replay trang thai cu.");
-      pushBlynkState();
+      pushCloudState();
       return;
   }
   logEvent("Nguon Box: " + String(turnOn ? "BAT" : "TAT") + " (Blynk)");
 #endif
   controlLogic.togglePowerBox(turnOn);
-  pushBlynkState();
+  pushCloudState();
 }
 
 void NetworkManager::handleRemoteLightCommand(bool turnOn) {
 #ifdef USE_BLYNK
   if (!canAcceptRemoteCommands()) {
       Serial.println("[BLYNK] Bo qua lenh den do server dang replay trang thai cu.");
-      pushBlynkState();
+      pushCloudState();
       return;
   }
   logEvent("Den: " + String(turnOn ? "BAT" : "TAT") + " (Blynk)");
 #endif
   controlLogic.toggleLight(turnOn);
-  pushBlynkState();
+  pushCloudState();
 }
 
 void NetworkManager::onBlynkConnected() {
@@ -874,7 +1124,7 @@ void NetworkManager::onBlynkConnected() {
   blynkReconnectBackoffMs = BLYNK_RECONNECT_BASE_MS;
   blynkRemoteGuardUntil = millis() + BLYNK_POST_CONNECT_GUARD_MS;
   Serial.println("[BLYNK] Cloud da ket noi. Dang dong bo trang thai local va tam khoa lenh replay.");
-  pushBlynkState();
+  pushCloudState();
 #endif
 }
 
@@ -1076,7 +1326,9 @@ void NetworkManager::loop() {
     }
   }
 
+#ifndef USE_RAINMAKER
   handleWiFi();
+#endif
   handleBlynk();
 
   static unsigned long lastNTPCheck = 0;
@@ -1087,6 +1339,9 @@ void NetworkManager::loop() {
 
   ElegantOTA.loop();
 
+  // Đồng bộ Logs lên Cloud (chỉ chạy ở Core 0)
+  syncLogsToCloud();
+
   // Quản lý Khóa AP 30 Phút
   if (isLockedOut && millis() - lockoutStartTime >= AP_LOCKOUT_MS) {
       isLockedOut = false;
@@ -1094,6 +1349,13 @@ void NetworkManager::loop() {
       Serial.println("[SECURITY] Hết 30 phút khóa AP. Mở khóa.");
   }
 
+  // Quản lý Reboot Non-blocking
+  if (pendingReboot && millis() - rebootTime >= 2000) {
+      ESP.restart();
+  }
+
   // Gọi checkAPCycle mỗi vòng lặp bất kể chế độ
+#ifndef USE_RAINMAKER
   checkAPCycle();
+#endif
 }

@@ -14,6 +14,19 @@
 // Avoid re-defining Blynk instance in multiple files
 #endif
 
+#ifdef USE_RAINMAKER
+#include <esp_rmaker_core.h>
+#include <esp_rmaker_standard_params.h>
+#include <esp_rmaker_standard_devices.h>
+#include <nvs_flash.h>
+#include <esp_wifi.h>
+#include <esp_event.h>
+#include <esp_log.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/event_groups.h>
+#endif
+
 class NetworkManager {
 public:
     NetworkManager();
@@ -28,6 +41,7 @@ public:
     String adminUser;
     String adminPass;
     bool isFirstBoot; // Biến cờ xác định thiết bị có cần tạo Admin lần đầu không
+    bool isOtaRunning; // Cờ báo hiệu đang chạy OTA
 
     // Cloud Configuration (Blynk)
     String blynkTemplate;
@@ -58,8 +72,16 @@ public:
     void syncOtaAuth();
 
     // Đồng bộ thời gian (NTP) và đẩy trạng thái Blynk
+    void syncLogsToCloud();
     void checkNTP();
+    void pushCloudState();
     void pushBlynkState();
+#ifdef USE_RAINMAKER
+    void setupRainMaker();
+    void startRainMakerProvisioning();
+    void stopRainMakerProvisioning();
+    void pushRainMakerState();
+#endif
     void handleRemoteDoorCommand(RemoteCommand cmd);
     void handleRemotePowerCommand(bool turnOn);
     void handleRemoteLightCommand(bool turnOn);
@@ -79,6 +101,7 @@ private:
     // Lưu trữ log tối đa (Ring buffer cơ bản)
     String eventLogs[15];
     int logIndex;
+    int lastBlynkSyncLogIndex;
 
     unsigned long lastWiFiCheck;
 
@@ -102,6 +125,10 @@ private:
     // Cờ báo ngắt
     volatile bool interruptConfigTriggered;
     volatile bool interruptResetTriggered;
+
+    // Cờ reboot non-blocking
+    bool pendingReboot;
+    unsigned long rebootTime;
 
     // Helper functions cho AP cycle và Schedule
     bool isScheduleActiveNow(int currentMins);
@@ -127,6 +154,23 @@ private:
     unsigned long blynkRemoteGuardUntil;
     bool blynkWasConnected;
     bool blynkInvalidToken;
+
+#ifdef USE_RAINMAKER
+    esp_rmaker_node_t *rainmakerNode;
+    esp_rmaker_device_t *doorDevice;
+    esp_rmaker_device_t *powerBoxDevice;
+    esp_rmaker_device_t *lightDevice;
+
+    bool rainmakerInitialized;
+    EventGroupHandle_t wifiEventGroup;
+    #define WIFI_CONNECTED_BIT BIT0
+    #define RM_MQTT_CONNECTED_BIT BIT1
+    #define RM_FACTORY_RESET_BIT BIT2
+
+    static esp_err_t write_cb_wrapper(const rm_param_val_t val, void *priv_data);
+    static void rainmaker_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
+    static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
+#endif
 };
 
 extern NetworkManager netManager;
