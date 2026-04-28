@@ -29,3 +29,16 @@
 - **Khôi phục Mạng Khẩn Cấp (Rescue AP)**: Khi mất kết nối WiFi quá 5 phút, hệ thống sẽ tự phát Rescue AP (với Blynk) hoặc bật lại BLE Provisioning (với RainMaker). Khi mạng có lại, phải tự động dập tắt ngay lập tức kết nối khẩn cấp này để bảo mật.
 - **Rate Limiting**: Các endpoint cần xác thực (checkAuth) phải khóa 30 phút nếu đăng nhập sai 5 lần để chống Brute-force.
 - **Tự Phục Hồi**: Hệ thống phải có Hardware Watchdog (WDT) và Daily Reboot vào 3 AM để làm sạch phân mảnh RAM.
+
+## 5. Lịch sử & Quy trình Phát triển Hiện tại
+- **Đã hoàn thành**: 
+  - Thiết kế và hoàn thiện giao diện WebUI (Mock HTML) theo chuẩn UI/UX nhẹ, gọn, Responsive.
+  - Đã tích hợp bản Web Preview (`web_preview_index.html`, `web_preview_setup.html`) vào mã nguồn C++ (`include/WebUI.h`).
+  - Đã chuyển đổi toàn bộ Javascript mô phỏng sang sử dụng `fetch()` gọi các endpoint thật trên ESP32 (`/power`, `/light`, `/control`, `/save_wifi`, `/save_schedule`, `/save_rescue_ap`, `/save_admin`, `/get_config`, `/logs`).
+- **Bước tiếp theo**: 
+  - Nạp firmware vào ESP32 thật thông qua PlatformIO để kiểm thử end-to-end các API WebUI có giao tiếp chính xác với `NetworkManager.cpp` không.
+  - Theo dõi việc lưu trữ Preferences khi submit Form (WiFi, Hẹn Giờ).
+- **Quy trình Xử lý Lỗi**:
+  - **Lỗi không nhận lệnh `pio`**: Do biến môi trường Windows thiếu đường dẫn PlatformIO. Cách khắc phục: Hãy chủ động mở Terminal tích hợp sẵn của PlatformIO trong VSCode và gõ lệnh build/upload ở đó.
+  - **Lỗi giao diện WebUI không hoạt động**: Bật DevTools F12 của trình duyệt, kiểm tra tab Console và Network xem API `fetch()` có bị trả về mã lỗi 400/404/500 không. So sánh chính xác tên các tham số `name="xxx"` ở thẻ input HTML với `request->arg("xxx")` trong C++.
+  - **Lỗi Crash / WDT Panic**: Kiểm tra lại nguyên tắc số 3 (Không dùng `delay()` trong callback). Rà soát xung đột mutex/queue giữa WebServer và Core điều khiển.

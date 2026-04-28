@@ -282,14 +282,14 @@ void NetworkManager::loadConfig() {
 
   rescueApSsid = preferences.getString("rescue_ssid", "");
   if (rescueApSsid == "") {
-    rescueApSsid = "esp32";
+    rescueApSsid = DEFAULT_RESCUE_AP_SSID;
     preferences.putString("rescue_ssid", rescueApSsid);
   }
 
   rescueApPass = preferences.getString("rescue_pass", "");
   bool generatedRescuePass = false;
   if (rescueApPass.length() < 8) {
-    rescueApPass = "12345678";
+    rescueApPass = DEFAULT_RESCUE_AP_PASS;
     preferences.putString("rescue_pass", rescueApPass);
     generatedRescuePass = true;
   }

@@ -72,22 +72,8 @@ const char setup_html[] PROGMEM = R"rawliteral(
             btn.textContent = "Đang lưu...";
             btn.disabled = true;
 
-            const formData = new URLSearchParams();
-            formData.append('admin_user', user);
-            formData.append('admin_pass', pass);
-
-            fetch('/setup_first_boot', { method: 'POST', body: formData })
-                .then(response => {
-                    if (response.ok) {
-                        alert("Thành công! Vui lòng đăng nhập lại với tài khoản vừa tạo.");
-                        window.location.reload();
-                    } else {
-                        errorBox.textContent = "Có lỗi xảy ra, vui lòng thử lại!";
-                        errorBox.style.display = 'block';
-                        btn.textContent = "Tạo Tài Khoản Admin";
-                        btn.disabled = false;
-                    }
-                });
+            alert(`(Bản Preview Mẫu)\nĐã lưu ảo thành công tài khoản: ${user}\nMật khẩu: ${pass}`);
+            window.location.href = "web_preview_index.html";
         }
     </script>
 </body>
@@ -100,66 +86,230 @@ const char* index_html = R"rawliteral(
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MyDoor Config - Bảng Điều Khiển</title>
+    <title>MyDoor Config - Bảng Điều Khiển (MOCK PREVIEW)</title>
     <style>
-        :root { --primary: #0f172a; --bg: #f8fafc; --card: #ffffff; --border: #e2e8f0; --accent: #3b82f6; --text: #334155; }
+        :root { --primary: #0f172a; --bg: #f8fafc; --card: #ffffff; --border: #e2e8f0; --accent: #3b82f6; --text: #334155; --tab-inactive: #94a3b8; }
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); padding: 20px; line-height: 1.5; }
         .container { max-width: 600px; margin: 0 auto; }
-        h1 { text-align: center; color: var(--primary); margin-bottom: 30px; font-weight: 800; letter-spacing: -0.5px; }
-        .card { background: var(--card); border-radius: 12px; padding: 25px; margin-bottom: 20px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03); border: 1px solid var(--border); }
-        .card-header { font-size: 1.25rem; font-weight: 600; color: var(--primary); margin-bottom: 15px; border-bottom: 2px solid var(--border); padding-bottom: 10px; }
+        h1 { text-align: center; color: var(--primary); margin-bottom: 20px; font-weight: 800; letter-spacing: -0.5px; }
+
+        /* Tabs Styling */
+        .tabs { display: flex; gap: 5px; margin-bottom: -1px; overflow-x: auto; padding-bottom: 1px; }
+        .tab-btn { background: #e2e8f0; color: var(--tab-inactive); border: 1px solid var(--border); border-bottom: none; padding: 12px 20px; cursor: pointer; border-radius: 8px 8px 0 0; font-weight: 600; font-size: 0.95rem; transition: all 0.2s; white-space: nowrap; }
+        .tab-btn:hover { background: #cbd5e1; color: var(--text); }
+        .tab-btn.active { background: var(--card); color: var(--accent); border-top: 3px solid var(--accent); border-bottom: 1px solid var(--card); z-index: 2; position: relative; }
+        .tab-content { display: none; background: var(--card); border: 1px solid var(--border); border-radius: 0 8px 8px 8px; padding: 25px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
+        .tab-content.active { display: block; }
+
+        /* General Styling inside Tabs */
+        .section-title { font-size: 1.15rem; font-weight: 600; color: var(--primary); margin-top: 0; margin-bottom: 15px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
         .form-group { margin-bottom: 15px; }
         label { display: block; margin-bottom: 5px; font-weight: 500; font-size: 0.9rem; }
         input[type="text"], input[type="password"], select { width: 100%; padding: 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 1rem; box-sizing: border-box; transition: border-color 0.2s; }
         input[type="text"]:focus, input[type="password"]:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1); }
         .btn { display: inline-block; background: var(--accent); color: white; padding: 10px 15px; border: none; border-radius: 6px; cursor: pointer; font-size: 1rem; font-weight: 600; text-align: center; transition: background 0.2s; width: 100%; }
         .btn:hover { background: #2563eb; }
-        .btn-scan { background: #475569; margin-bottom: 10px; }
+        .btn-scan { background: #475569; margin-bottom: 15px; }
         .btn-scan:hover { background: #334155; }
         .btn-danger { background: #ef4444; }
         .btn-danger:hover { background: #dc2626; }
         .btn-warning { background: #f59e0b; margin-bottom: 10px; }
         .btn-warning:hover { background: #d97706; }
+
+        /* Dashboard Control Grid */
+        .control-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 25px; }
+        .control-box { border: 1px solid var(--border); border-radius: 8px; padding: 15px; text-align: center; background: #f8fafc; display: flex; flex-direction: column; }
+        .control-title { font-weight: 600; margin-bottom: 10px; color: var(--primary); }
+        .status-badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 0.85rem; font-weight: bold; margin-bottom: 15px; align-self: center; }
+        .status-on { background: #dcfce7; color: #166534; }
+        .status-off { background: #fee2e2; color: #991b1b; }
+        .relay-btns { display: flex; gap: 8px; margin-top: auto; }
+        .relay-btns .btn { padding: 8px; font-size: 0.9rem; flex: 1; margin: 0; box-sizing: border-box; }
+
+        /* Other elements */
         .secret-list { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; margin-bottom: 15px; }
         .secret-row { display: grid; grid-template-columns: 145px 1fr; gap: 10px; padding: 10px; border-bottom: 1px solid var(--border); align-items: center; }
         .secret-row:last-child { border-bottom: 0; }
         .secret-label { color: #64748b; font-size: 0.9rem; }
-        .secret-value { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; word-break: break-all; }
+        .secret-value { font-family: monospace; word-break: break-all; }
         .time-flex { display: flex; gap: 10px; }
         .time-flex select { flex: 1; }
         .days-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 10px; }
         .day-checkbox { display: flex; align-items: center; gap: 5px; font-size: 0.9rem; }
-        .status { padding: 10px; border-radius: 6px; margin-bottom: 15px; display: none; text-align: center; font-weight: 500; }
-        .status.success { background: #dcfce7; color: #166534; display: block; }
-        .status.error { background: #fee2e2; color: #991b1b; display: block; }
-        .loader { display: inline-block; width: 16px; height: 16px; border: 2px solid #fff; border-bottom-color: transparent; border-radius: 50%; animation: rotation 1s linear infinite; margin-left: 10px; vertical-align: middle; }
+        .preview-badge { position: fixed; top: 10px; right: 10px; background: #ef4444; color: white; padding: 5px 10px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; z-index: 1000; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
+        .loader { display: inline-block; width: 14px; height: 14px; border: 2px solid #fff; border-bottom-color: transparent; border-radius: 50%; animation: rotation 1s linear infinite; vertical-align: middle; }
         @keyframes rotation { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .status-msg { padding: 10px; border-radius: 6px; margin-bottom: 15px; display: none; text-align: center; font-weight: 500; }
+        .status-msg.success { background: #dcfce7; color: #166534; display: block; }
+        .status-msg.error { background: #fee2e2; color: #991b1b; display: block; }
     </style>
 </head>
 <body>
+    
     <div class="container">
         <h1>⚙️ MyDoor Config</h1>
 
-        <!-- TAB: MẠNG WIFI -->
-        <div class="card">
-            <div class="card-header">📡 Kết Nối WiFi & Cloud</div>
-            <button type="button" class="btn btn-scan" id="btnScan" onclick="scanWifi()">Quét Mạng Xung Quanh</button>
-            <div id="wifiStatus"></div>
+        <div class="tabs">
+            <button class="tab-btn active" onclick="openTab(event, 'tab-dash')">Dashboard</button>
+            <button class="tab-btn" onclick="openTab(event, 'tab-network')">Network & Cloud</button>
+            <button class="tab-btn" onclick="openTab(event, 'tab-security')">Bảo mật & WiFi</button>
+            <button class="tab-btn" onclick="openTab(event, 'tab-system')">Hệ thống</button>
+        </div>
 
-            <form id="wifiForm" onsubmit="saveWifi(event)">
-                <div class="form-group">
-                    <label for="ssid">Tên Mạng (SSID)</label>
-                    <select id="ssid" name="ssid" required>
-                        <option value="">-- Bấm Quét Mạng để chọn --</option>
-                    </select>
+        <!-- TAB 1: DASHBOARD -->
+        <div id="tab-dash" class="tab-content active">
+            <h2 class="section-title">📊 Điều Khiển Trực Tiếp</h2>
+
+            <div class="control-grid" style="grid-template-columns: 1fr;">
+                <div class="control-box">
+                    <div class="control-title">Nguồn Tổng (Relay 4)</div>
+                    <span id="powerStatus" class="status-badge status-off">OFF</span>
+                    <div class="relay-btns" style="justify-content: center;">
+                        <button class="btn" style="background:#10b981" onclick="toggleRelay('power', true)">BẬT</button>
+                        <button class="btn btn-danger" onclick="toggleRelay('power', false)">TẮT</button>
+                    </div>
                 </div>
+            </div>
+
+            <div class="control-grid">
+                <div class="control-box">
+                    <div class="control-title">Cửa Nhà (Relay 1-2-3)</div>
+                    <span id="doorStatus" class="status-badge status-off">DỪNG</span>
+                    <div class="relay-btns" style="justify-content: center;">
+                        <button class="btn" style="background:#10b981" onclick="toggleRelay('door_up', true)">LÊN</button>
+                        <button class="btn btn-warning" onclick="toggleRelay('door_stop', true)">DỪNG</button>
+                        <button class="btn" style="background:#3b82f6" onclick="toggleRelay('door_down', true)">XUỐNG</button>
+                    </div>
+                </div>
+                <div class="control-box">
+                    <div class="control-title">Đèn Sáng (Relay 5)</div>
+                    <span id="lightStatus" class="status-badge status-off">OFF</span>
+                    <div class="relay-btns" style="justify-content: center;">
+                        <button class="btn" style="background:#10b981" onclick="toggleRelay('light', true)">BẬT</button>
+                        <button class="btn btn-danger" onclick="toggleRelay('light', false)">TẮT</button>
+                    </div>
+                </div>
+            </div>
+
+            <h2 class="section-title" style="margin-top: 30px;">📝 Terminal Logs</h2>
+            <div style="background: #000; padding: 10px; border-radius: 6px; border: 1px solid #333;">
+                <textarea id="terminalLog" readonly style="width: 100%; height: 150px; background: transparent; color: #0f0; border: none; font-family: monospace; font-size: 0.85em; resize: none; outline: none;">[12:00:00] ESP32 MOCK SERVER STARTED
+[12:00:05] WiFi Connected (Mock)
+[12:00:08] Blynk Cloud Ready (Mock)
+[12:01:20] Nguon Box: BAT (WebUI)
+[12:05:00] Den: BAT (Timer)
+</textarea>
+            </div>
+            <button class="btn btn-scan" onclick="fetchLogsMock()" style="margin-top: 10px; margin-bottom: 20px;">Làm Mới Log</button>
+
+            <h2 class="section-title" style="margin-top: 30px;">⏰ Cài Đặt Hẹn Giờ</h2>
+            <form id="scheduleForm" onsubmit="saveSchedule(event)">
+                <div class="form-group" style="display: flex; align-items: center; gap: 10px;">
+                    <label for="timezone" style="margin: 0; white-space: nowrap;">Múi Giờ:</label>
+                    <select id="timezone" name="timezone" style="width: auto;"></select>
+                </div>
+
+                <div style="background: #f1f5f9; padding: 10px; border-radius: 8px; margin-bottom: 15px; overflow-x: auto;">
+                    <table style="width: 100%; border-collapse: collapse; font-size: 0.9rem; min-width: 400px;">
+                        <tr>
+                            <th style="text-align: left; padding: 8px; border: 1px solid var(--border); background: #e2e8f0;">Thiết bị</th>
+                            <th style="text-align: center; padding: 8px; border: 1px solid var(--border); background: #e2e8f0;">Giờ Bật</th>
+                            <th style="text-align: center; padding: 8px; border: 1px solid var(--border); background: #e2e8f0;">Giờ Tắt</th>
+                        </tr>
+                        <tr>
+                            <td style="padding: 10px; font-weight: 500; border: 1px solid var(--border); background: #ffffff;">Nguồn (R4)</td>
+                            <td style="padding: 10px; border: 1px solid var(--border); background: #ffffff; text-align: center;">
+                                <div class="time-flex" style="justify-content: center;">
+                                    <select id="onHour" name="onHour" style="padding: 5px; max-width: 70px;"></select>
+                                    <select id="onMin" name="onMin" style="padding: 5px; max-width: 70px;"></select>
+                                </div>
+                            </td>
+                            <td style="padding: 10px; border: 1px solid var(--border); background: #ffffff; text-align: center;">
+                                <div class="time-flex" style="justify-content: center;">
+                                    <select id="offHour" name="offHour" style="padding: 5px; max-width: 70px;"></select>
+                                    <select id="offMin" name="offMin" style="padding: 5px; max-width: 70px;"></select>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 10px; font-weight: 500; border: 1px solid var(--border); background: #ffffff;">Đèn (R5)</td>
+                            <td style="padding: 10px; border: 1px solid var(--border); background: #ffffff; text-align: center;">
+                                <div class="time-flex" style="justify-content: center;">
+                                    <select id="lightOnHour" name="lightOnHour" style="padding: 5px; max-width: 70px;"></select>
+                                    <select id="lightOnMin" name="lightOnMin" style="padding: 5px; max-width: 70px;"></select>
+                                </div>
+                            </td>
+                            <td style="padding: 10px; border: 1px solid var(--border); background: #ffffff; text-align: center;">
+                                <div class="time-flex" style="justify-content: center;">
+                                    <select id="lightOffHour" name="lightOffHour" style="padding: 5px; max-width: 70px;"></select>
+                                    <select id="lightOffMin" name="lightOffMin" style="padding: 5px; max-width: 70px;"></select>
+                                </div>
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+
                 <div class="form-group">
-                    <label for="password">Mật Khẩu WiFi</label>
-                    <input type="password" id="password" name="password" placeholder="Nhập mật khẩu WiFi">
+                    <label>Ngày Áp Dụng trong tuần:</label>
+                    <div class="days-grid">
+                        <label class="day-checkbox"><input type="checkbox" name="day_1" value="1" checked> T2</label>
+                        <label class="day-checkbox"><input type="checkbox" name="day_2" value="1" checked> T3</label>
+                        <label class="day-checkbox"><input type="checkbox" name="day_3" value="1" checked> T4</label>
+                        <label class="day-checkbox"><input type="checkbox" name="day_4" value="1" checked> T5</label>
+                        <label class="day-checkbox"><input type="checkbox" name="day_5" value="1" checked> T6</label>
+                        <label class="day-checkbox"><input type="checkbox" name="day_6" value="1" checked> T7</label>
+                        <label class="day-checkbox"><input type="checkbox" name="day_0" value="1" checked> CN</label>
+                    </div>
+                </div>
+                <button type="submit" class="btn" id="btnSaveSchedule">Lưu Lịch Trình</button>
+            </form>
+        </div>
+
+        <!-- TAB 2: NETWORK & CLOUD -->
+        <div id="tab-network" class="tab-content">
+            <h2 class="section-title">📡 Mạng WiFi Chính</h2>
+            <form id="wifiForm" onsubmit="saveWifi(event)">
+                <div style="overflow-x: auto; margin-bottom: 15px;">
+                    <table style="width: 100%; border-collapse: collapse; text-align: left; min-width: 500px;">
+                        <tr>
+                            <th style="padding: 8px; border: 1px solid var(--border); background: #e2e8f0; width: 15%;"></th>
+                            <th style="padding: 8px; border: 1px solid var(--border); background: #e2e8f0; width: 35%;">WiFi Ưu Tiên 1</th>
+                            <th style="padding: 8px; border: 1px solid var(--border); background: #e2e8f0; width: 35%;">WiFi Ưu Tiên 2</th>
+                            <th style="padding: 8px; border: 1px solid var(--border); background: #e2e8f0; text-align: center; width: 15%;">
+                                <button type="button" class="btn btn-scan" id="btnScan" onclick="scanWifiMock()" style="margin: 0; padding: 6px 12px; font-size: 0.85rem;">Quét WiFi</button>
+                            </th>
+                        </tr>
+                        <tr>
+                            <td style="padding: 8px; font-weight: 500; border: 1px solid var(--border); background: #f8fafc;">SSID</td>
+                            <td style="padding: 8px; border: 1px solid var(--border);">
+                                <select id="ssid" name="ssid" style="padding: 8px; width: 100%; box-sizing: border-box;" required>
+                                    <option value="">-- Chọn Mạng --</option>
+                                    <option value="Viettel_5G_Home" selected>Viettel_5G_Home</option>
+                                </select>
+                            </td>
+                            <td style="padding: 8px; border: 1px solid var(--border);">
+                                <select id="ssid2" name="ssid2" style="padding: 8px; width: 100%; box-sizing: border-box;">
+                                    <option value="">-- Chọn Mạng --</option>
+                                    <option value="Wifi_HangXom">Wifi_HangXom</option>
+                                </select>
+                            </td>
+                            <td style="padding: 8px; border: 1px solid var(--border); background: #f8fafc;"></td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 8px; font-weight: 500; border: 1px solid var(--border); background: #f8fafc;">Mật khẩu</td>
+                            <td style="padding: 8px; border: 1px solid var(--border);">
+                                <input type="password" id="password" name="password" placeholder="Mật khẩu 1" style="padding: 8px; width: 100%; box-sizing: border-box;">
+                            </td>
+                            <td style="padding: 8px; border: 1px solid var(--border);">
+                                <input type="password" id="password2" name="password2" placeholder="Mật khẩu 2" style="padding: 8px; width: 100%; box-sizing: border-box;">
+                            </td>
+                            <td style="padding: 8px; border: 1px solid var(--border); background: #f8fafc;"></td>
+                        </tr>
+                    </table>
                 </div>
 
                 <hr style="border: 0; border-top: 1px dashed var(--border); margin: 20px 0;">
-                <label style="font-weight: 600; color: var(--primary); margin-bottom: 10px; display: block;">Cấu Hình Đám Mây (Cloud)</label>
+                <h2 class="section-title" style="margin-top: 30px;">☁️ Cấu Hình Đám Mây (Cloud)</h2>
 
 #ifdef USE_BLYNK
                 <div id="blynkFields">
@@ -188,123 +338,102 @@ const char* index_html = R"rawliteral(
             </form>
         </div>
 
-        <div class="card">
-            <div class="card-header">📝 Nhật Ký Hoạt Động (Logs)</div>
-            <div style="background: #000; padding: 10px; border-radius: 6px; border: 1px solid #333;">
-                <textarea id="terminalLog" readonly style="width: 100%; height: 120px; background: transparent; color: #0f0; border: none; font-family: monospace; font-size: 0.85em; resize: none; outline: none;">Đang lấy logs...</textarea>
-            </div>
-            <button class="btn btn-scan" onclick="fetchLogs()" style="margin-top: 10px;">Làm Mới Log</button>
-        </div>
+        <!-- TAB 3: ACCOUNT & SECURITY -->
+        <div id="tab-security" class="tab-content">
+            <h2 class="section-title">👤 Đổi Mật Khẩu Admin (WebUI)</h2>
+            <form id="adminForm" onsubmit="saveAdmin(event)">
+                <div class="form-group">
+                    <label>Tài khoản Admin mới</label>
+                    <input type="text" placeholder="VD: admin" required>
+                </div>
+                <div class="form-group">
+                    <label>Mật khẩu Admin mới</label>
+                    <input type="password" placeholder="Nhập mật khẩu mới" required>
+                </div>
+                <button type="submit" class="btn" id="btnSaveAdmin">Đổi Thông Tin Đăng Nhập</button>
+            </form>
 
-        <!-- TAB: HẸN GIỜ NGUỒN TỔNG -->
-        <div class="card">
-            <div class="card-header">⏰ Hẹn Giờ Nguồn Tổng (Relay 4)</div>
-            <form id="scheduleForm" onsubmit="saveSchedule(event)">
-                <div class="form-group">
-                    <label for="timezone">Múi Giờ (Timezone Thế Giới)</label>
-                    <select id="timezone" name="timezone"></select>
-                </div>
-                <div class="form-group">
-                    <label>Giờ Bật Nguồn (Ví dụ: Sáng dậy)</label>
-                    <div class="time-flex">
-                        <select id="onHour" name="onHour"></select>
-                        <select id="onMin" name="onMin"></select>
+            <h2 class="section-title" style="margin-top: 30px;">🆘 Quản Lý WiFi Khẩn Cấp (Rescue AP) & OTA</h2>
+            <p style="font-size: 0.9rem; color: #64748b; margin-bottom: 15px;">Mạng Rescue AP sẽ tự phát ra (IP 10.10.10.1) nếu thiết bị không bắt được Wifi nhà bạn trong vòng 5 phút. Hãy đặt mật khẩu thủ công để dễ nhớ.</p>
+            <form id="rescueOtaForm" onsubmit="saveRescueOta(event)">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+                    <div style="background: #f8fafc; padding: 15px; border-radius: 8px; border: 1px solid var(--border);">
+                        <h3 style="font-size: 1rem; margin-top: 0; color: var(--primary);">Rescue AP</h3>
+                        <div class="form-group">
+                            <label>SSID (Tên mạng phát ra)</label>
+                            <input type="text" id="rescue_ap_ssid" name="rescue_ap_ssid" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Mật khẩu Rescue AP</label>
+                            <input type="password" id="rescue_ap_pass" name="rescue_ap_pass" placeholder="Nhập mật khẩu (để trống: không đổi)">
+                        </div>
+                    </div>
+
+                    <div style="background: #f8fafc; padding: 15px; border-radius: 8px; border: 1px solid var(--border);">
+                        <h3 style="font-size: 1rem; margin-top: 0; color: var(--primary);">Cập nhật OTA</h3>
+                        <div class="form-group">
+                            <label>Tài khoản OTA</label>
+                            <input type="text" id="ota_user" name="ota_user" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Mật khẩu OTA</label>
+                            <input type="password" id="ota_pass" name="ota_pass" placeholder="Nhập mật khẩu (để trống: không đổi)">
+                        </div>
                     </div>
                 </div>
-                <div class="form-group">
-                    <label>Giờ Tắt Nguồn (Ví dụ: Đi ngủ)</label>
-                    <div class="time-flex">
-                        <select id="offHour" name="offHour"></select>
-                        <select id="offMin" name="offMin"></select>
-                    </div>
-                </div>
-                <div class="form-group">
-                    <label>Ngày Áp Dụng trong tuần:</label>
-                    <div class="days-grid">
-                        <label class="day-checkbox"><input type="checkbox" name="day_1" value="1"> T2</label>
-                        <label class="day-checkbox"><input type="checkbox" name="day_2" value="1"> T3</label>
-                        <label class="day-checkbox"><input type="checkbox" name="day_3" value="1"> T4</label>
-                        <label class="day-checkbox"><input type="checkbox" name="day_4" value="1"> T5</label>
-                        <label class="day-checkbox"><input type="checkbox" name="day_5" value="1"> T6</label>
-                        <label class="day-checkbox"><input type="checkbox" name="day_6" value="1"> T7</label>
-                        <label class="day-checkbox"><input type="checkbox" name="day_0" value="1"> CN</label>
-                    </div>
-                </div>
-                <button type="submit" class="btn" id="btnSaveSchedule">Lưu Hẹn Giờ</button>
+                <button type="submit" class="btn" id="btnSaveRescueOta">Lưu Cấu Hình Rescue AP & OTA</button>
             </form>
         </div>
 
-        <!-- TAB: BẢO MẬT & HỆ THỐNG -->
-        <div class="card">
-            <div class="card-header">🔐 Quản Trị Hệ Thống</div>
-            <form id="adminForm" onsubmit="saveAdmin(event)" style="margin-bottom: 20px;">
-                <div class="form-group">
-                    <label for="admin_user">Tài khoản Admin mới</label>
-                    <input type="text" id="admin_user" name="admin_user" placeholder="VD: admin" required minlength="4" maxlength="32">
-                </div>
-                <div class="form-group">
-                    <label for="admin_pass">Mật khẩu Admin mới</label>
-                    <input type="password" id="admin_pass" name="admin_pass" placeholder="Nhập mật khẩu mới" required minlength="6" maxlength="64">
-                </div>
-                <button type="submit" class="btn">Đổi Thông Tin Đăng Nhập</button>
-            </form>
+        <!-- TAB 4: SYSTEM -->
+        <div id="tab-system" class="tab-content">
+            <h2 class="section-title">⚙️ Quản Trị Vi Điều Khiển</h2>
 
-            <hr style="border: 0; border-top: 1px solid var(--border); margin: 20px 0;">
-
-            <div id="credentialStatus"></div>
-            <div class="secret-list">
-                <div class="secret-row">
-                    <span class="secret-label">Rescue AP SSID</span>
-                    <span class="secret-value" id="rescueSsid">-</span>
-                </div>
-                <div class="secret-row">
-                    <span class="secret-label">Rescue AP Password</span>
-                    <span class="secret-value" id="rescuePassMask">-</span>
-                </div>
-                <div class="secret-row">
-                    <span class="secret-label">OTA User</span>
-                    <span class="secret-value" id="otaUser">-</span>
-                </div>
-                <div class="secret-row">
-                    <span class="secret-label">OTA Password</span>
-                    <span class="secret-value" id="otaPassMask">-</span>
-                </div>
+            <div style="background: #fffbeb; border: 1px solid #fde68a; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+                <h3 style="margin-top:0; color: #b45309;">☁️ Cập Nhật Firmware (OTA)</h3>
+                <p style="font-size: 0.95rem; color: #78350f;">Cho phép nạp file `.bin` mới trực tiếp qua WiFi mà không cần cắm cáp USB.</p>
+                <a href="/update" style="text-decoration: none;">
+                    <button type="button" class="btn" style="background:#10b981;">Mở Trang Nạp Firmware (ElegantOTA)</button>
+                </a>
             </div>
-            <button type="button" class="btn btn-warning" id="btnRotateRescue" onclick="rotateCredential('/rotate_rescue_ap', 'btnRotateRescue', 'Xoay mat khau Rescue AP? Thiet bi dang o AP mode se khoi dong lai AP voi mat khau moi.')">Xoay Mật Khẩu Rescue AP</button>
-            <button type="button" class="btn btn-warning" id="btnRotateOta" onclick="rotateCredential('/rotate_ota', 'btnRotateOta', 'Xoay mat khau OTA? Credential moi se khong hien thi lai tren giao dien.')">Xoay Mật Khẩu OTA</button>
 
-            <hr style="border: 0; border-top: 1px solid var(--border); margin: 20px 0;">
-
-            <a href="/update" style="text-decoration: none;"><button type="button" class="btn" style="background:#10b981; margin-bottom: 10px;">☁️ Nạp Firmware (OTA Update)</button></a>
-            <button type="button" class="btn btn-danger" onclick="rebootESP()">🔄 Khởi Động Lại Hệ Thống</button>
+            <div style="background: #fef2f2; border: 1px solid #fecaca; padding: 20px; border-radius: 8px;">
+                <h3 style="margin-top:0; color: #b91c1c;">⚠️ Khởi Động Lại</h3>
+                <p style="font-size: 0.95rem; color: #7f1d1d;">Thiết bị sẽ đóng toàn bộ Relay, ngắt kết nối WiFi và khởi động lại vi xử lý ESP32.</p>
+                <button type="button" class="btn btn-danger" onclick="rebootESP()">🔄 Khởi Động Lại Hệ Thống</button>
+            </div>
         </div>
     </div>
 
     <script>
-        function controlDoor(cmd) {
-            fetch('/control', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: 'cmd=' + cmd
-            });
+        function openTab(evt, tabId) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+            document.getElementById(tabId).classList.add('active');
+            evt.currentTarget.classList.add('active');
         }
 
-        function togglePower() {
-            const current = document.getElementById('powerStatus').textContent === 'ON';
-            fetch('/power', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: 'state=' + (!current ? '1' : '0')
-            }).then(() => updateStatus());
-        }
-
-        function toggleLight() {
-            const current = document.getElementById('lightStatus').textContent === 'ON';
-            fetch('/light', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: 'state=' + (!current ? '1' : '0')
-            }).then(() => updateStatus());
+        function toggleRelay(type, turnOn) {
+            if (type.startsWith('door')) {
+                let cmd = type.replace('door_', '');
+                fetch('/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: 'cmd=' + cmd
+                });
+            } else if (type === 'power') {
+                fetch('/power', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: 'state=' + (turnOn ? '1' : '0')
+                }).then(() => updateStatus());
+            } else if (type === 'light') {
+                fetch('/light', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: 'state=' + (turnOn ? '1' : '0')
+                }).then(() => updateStatus());
+            }
         }
 
         async function fetchLogs() {
@@ -313,8 +442,12 @@ const char* index_html = R"rawliteral(
                 const text = await res.text();
                 const ta = document.getElementById('terminalLog');
                 ta.value = text;
-                ta.scrollTop = ta.scrollHeight; // Cuộn xuống cuối
+                ta.scrollTop = ta.scrollHeight;
             } catch(e) {}
+        }
+
+        function fetchLogsMock() {
+            fetchLogs();
         }
 
         async function updateStatus() {
@@ -330,74 +463,65 @@ const char* index_html = R"rawliteral(
                     lStatus.textContent = data.light_on ? 'ON' : 'OFF';
                     lStatus.className = 'status-badge ' + (data.light_on ? 'status-on' : 'status-off');
                 }
-                fetchLogs(); // Lấy thêm log
+
+                fetchLogs();
             } catch (e) {}
         }
-        setInterval(updateStatus, 3000); // Tự động cập nhật mỗi 3s
+        setInterval(updateStatus, 3000);
 
-        // Khởi tạo các select box Giờ/Phút và Timezone
         function initSelects() {
             let tzHTML = '';
             for(let i=-12; i<=14; i++) {
                 let sign = i >= 0 ? '+' : '';
-                let label = i == 7 ? 'UTC +7 (Việt Nam, Thái Lan)' : `UTC ${sign}${i}`;
-                tzHTML += `<option value="${i}" ${i==7 ? 'selected' : ''}>${label}</option>`;
+                let label = i == 7 ? 'UTC +7 (Việt Nam)' : `UTC ${sign}${i}`;
+                tzHTML += `<option value="${i}">${label}</option>`;
             }
             document.getElementById('timezone').innerHTML = tzHTML;
 
             let hourHTML = '';
             for(let i=0; i<24; i++) hourHTML += `<option value="${i}">${i < 10 ? '0'+i : i}</option>`;
-            document.getElementById('onHour').innerHTML = hourHTML;
-            document.getElementById('offHour').innerHTML = hourHTML;
-            document.getElementById('lightOnHour').innerHTML = hourHTML;
-            document.getElementById('lightOffHour').innerHTML = hourHTML;
+            ['onHour','offHour','lightOnHour','lightOffHour'].forEach(id => {
+                if(document.getElementById(id)) document.getElementById(id).innerHTML = hourHTML;
+            });
 
             let minHTML = '';
             for(let i=0; i<60; i++) minHTML += `<option value="${i}">${i < 10 ? '0'+i : i}</option>`;
-            document.getElementById('onMin').innerHTML = minHTML;
-            document.getElementById('offMin').innerHTML = minHTML;
-            document.getElementById('lightOnMin').innerHTML = minHTML;
-            document.getElementById('lightOffMin').innerHTML = minHTML;
+            ['onMin','offMin','lightOnMin','lightOffMin'].forEach(id => {
+                if(document.getElementById(id)) document.getElementById(id).innerHTML = minHTML;
+            });
         }
         initSelects();
 
-        // Lấy config cũ từ ESP32 khi load trang
         async function loadDeviceConfig() {
-            const data = await fetch('/get_config').then(r => r.json());
-            document.getElementById('timezone').value = data.timezone !== undefined ? data.timezone : 7;
-            document.getElementById('onHour').value = data.onHour;
-            document.getElementById('onMin').value = data.onMin;
-            document.getElementById('offHour').value = data.offHour;
-            document.getElementById('offMin').value = data.offMin;
-            document.getElementById('lightOnHour').value = data.lightOnHour;
-            document.getElementById('lightOnMin').value = data.lightOnMin;
-            document.getElementById('lightOffHour').value = data.lightOffHour;
-            document.getElementById('lightOffMin').value = data.lightOffMin;
-            document.getElementById('blynkTemplate').value = data.blynkTemplate || '';
-            document.getElementById('blynkName').value = data.blynkName || '';
-            document.getElementById('blynkAuth').value = data.blynkAuth || '';
-            document.getElementById('rescueSsid').textContent = data.rescue_ssid || '-';
-            document.getElementById('rescuePassMask').textContent = data.rescue_pass_mask || '-';
-            document.getElementById('otaUser').textContent = data.ota_user || '-';
-            document.getElementById('otaPassMask').textContent = data.ota_pass_mask || '-';
+            try {
+                const data = await fetch('/get_config').then(r => r.json());
+                if(data.timezone !== undefined) document.getElementById('timezone').value = data.timezone;
+                if(data.onHour !== undefined) document.getElementById('onHour').value = data.onHour;
+                if(data.onMin !== undefined) document.getElementById('onMin').value = data.onMin;
+                if(data.offHour !== undefined) document.getElementById('offHour').value = data.offHour;
+                if(data.offMin !== undefined) document.getElementById('offMin').value = data.offMin;
 
-            for(let i=0; i<7; i++) {
-                const day = document.querySelector(`input[name="day_${i}"]`);
-                day.checked = !!(data.days && (data.days & (1 << i)));
-                const lightScheduleDays = document.querySelector(`input[name="lightScheduleDays_${i}"]`);
-                if (lightScheduleDays) lightScheduleDays.checked = !!(data.lightScheduleDays && (data.lightScheduleDays & (1 << i)));
-            }
+                if(data.lightOnHour !== undefined) document.getElementById('lightOnHour').value = data.lightOnHour;
+                if(data.lightOnMin !== undefined) document.getElementById('lightOnMin').value = data.lightOnMin;
+                if(data.lightOffHour !== undefined) document.getElementById('lightOffHour').value = data.lightOffHour;
+                if(data.lightOffMin !== undefined) document.getElementById('lightOffMin').value = data.lightOffMin;
 
-            updateStatus(); // Gọi ngay 1 lần lúc đầu
+                if(document.getElementById('blynkTemplate') && data.blynkTemplate) document.getElementById('blynkTemplate').value = data.blynkTemplate;
+                if(document.getElementById('blynkName') && data.blynkName) document.getElementById('blynkName').value = data.blynkName;
+                if(document.getElementById('blynkAuth') && data.blynkAuth) document.getElementById('blynkAuth').value = data.blynkAuth;
+
+                if(data.rescue_ssid) document.getElementById('rescue_ap_ssid').value = data.rescue_ssid;
+                if(data.ota_user) document.getElementById('ota_user').value = data.ota_user;
+
+                for(let i=0; i<7; i++) {
+                    const day = document.querySelector(`input[name="day_${i}"]`);
+                    if (day) day.checked = !!(data.days && (data.days & (1 << i)));
+                }
+
+                updateStatus();
+            } catch(e) {}
         }
         loadDeviceConfig();
-
-        function showStatus(elemId, msg, isError = false) {
-            const el = document.getElementById(elemId);
-            el.className = `status ${isError ? 'error' : 'success'}`;
-            el.innerHTML = msg;
-            setTimeout(() => { el.style.display = 'none'; }, 3000);
-        }
 
         async function scanWifi() {
             const btn = document.getElementById('btnScan');
@@ -407,17 +531,16 @@ const char* index_html = R"rawliteral(
                 const res = await fetch('/scan');
                 const networks = await res.json();
                 let html = '<option value="">-- Chọn Mạng WiFi --</option>';
-                // Loại bỏ WiFi trùng tên và chọn sóng mạnh nhất
                 const unique = {};
                 networks.forEach(n => {
                     if(!unique[n.ssid] || unique[n.ssid].rssi < n.rssi) unique[n.ssid] = n;
                 });
-
                 Object.values(unique).sort((a,b) => b.rssi - a.rssi).forEach(n => {
                     const signal = n.rssi > -60 ? '📶 Rất mạnh' : (n.rssi > -80 ? '📶 Khá' : '📶 Yếu');
                     html += `<option value="${n.ssid}">${n.ssid} (${signal})</option>`;
                 });
                 document.getElementById('ssid').innerHTML = html;
+                document.getElementById('ssid2').innerHTML = html;
                 btn.innerHTML = 'Quét Lại';
             } catch(e) {
                 alert('Lỗi khi quét WiFi!');
@@ -425,6 +548,8 @@ const char* index_html = R"rawliteral(
             }
             btn.disabled = false;
         }
+
+        function scanWifiMock() { scanWifi(); }
 
         async function submitForm(e, url, btnId) {
             e.preventDefault();
@@ -447,26 +572,36 @@ const char* index_html = R"rawliteral(
 
         function saveWifi(e) { submitForm(e, '/save_wifi', 'btnSaveWifi'); }
         function saveSchedule(e) { submitForm(e, '/save_schedule', 'btnSaveSchedule'); }
-        function saveAdmin(e) { submitForm(e, '/save_admin', e.target.querySelector('button').id = 'btnSaveAdmin'); }
+        function saveAdmin(e) { submitForm(e, '/save_admin', 'btnSaveAdmin'); }
 
-        async function rotateCredential(url, btnId, message) {
-            if(!confirm(message)) return;
-
-            const btn = document.getElementById(btnId);
+        async function saveRescueOta(e) {
+            e.preventDefault();
+            const btn = document.getElementById('btnSaveRescueOta');
             const oldText = btn.innerHTML;
-            btn.innerHTML = 'Đang xoay... <span class="loader"></span>';
+            btn.innerHTML = 'Đang lưu... <span class="loader"></span>';
             btn.disabled = true;
 
+            const fd = new FormData(e.target);
+
+            const rescueFd = new FormData();
+            rescueFd.append('rescue_ap_ssid', fd.get('rescue_ap_ssid'));
+            if(fd.get('rescue_ap_pass')) rescueFd.append('rescue_ap_pass', fd.get('rescue_ap_pass'));
+
+            const adminFd = new FormData();
+            adminFd.append('admin_user', fd.get('ota_user'));
+            if(fd.get('ota_pass')) adminFd.append('admin_pass', fd.get('ota_pass'));
+
             try {
-                const res = await fetch(url, { method: 'POST' });
-                if(res.ok) {
-                    showStatus('credentialStatus', 'Credential đã được xoay. Secret mới được lưu trong NVS và không hiển thị lại trên giao diện.');
-                    await loadDeviceConfig();
+                let r1 = await fetch('/save_rescue_ap', { method: 'POST', body: rescueFd });
+                let r2 = await fetch('/save_admin', { method: 'POST', body: adminFd });
+
+                if (r1.ok && r2.ok) {
+                    alert('Lưu cấu hình Rescue AP và OTA thành công!');
                 } else {
-                    showStatus('credentialStatus', 'Không thể xoay credential.', true);
+                    alert('Có lỗi xảy ra khi lưu cấu hình.');
                 }
             } catch(err) {
-                showStatus('credentialStatus', 'Mất kết nối tới ESP32.', true);
+                alert('Mất kết nối tới ESP32!');
             }
 
             btn.innerHTML = oldText;
