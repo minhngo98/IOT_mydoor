@@ -35,10 +35,36 @@
   - Thiết kế và hoàn thiện giao diện WebUI (Mock HTML) theo chuẩn UI/UX nhẹ, gọn, Responsive.
   - Đã tích hợp bản Web Preview (`web_preview_index.html`, `web_preview_setup.html`) vào mã nguồn C++ (`include/WebUI.h`).
   - Đã chuyển đổi toàn bộ Javascript mô phỏng sang sử dụng `fetch()` gọi các endpoint thật trên ESP32 (`/power`, `/light`, `/control`, `/save_wifi`, `/save_schedule`, `/save_rescue_ap`, `/save_admin`, `/get_config`, `/logs`).
+  - Đã sửa đồng bộ WebUI ↔ backend cho các lỗi lớn: first-boot setup admin, `pass2` WiFi dự phòng, form admin, lịch đèn `l_onHour/l_onMin/l_offHour/l_offMin`, `l_day_*`, preload `admin_user`, và cập nhật từng phần cho Rescue AP / OTA khi để trống mật khẩu.
 - **Bước tiếp theo**: 
   - Nạp firmware vào ESP32 thật thông qua PlatformIO để kiểm thử end-to-end các API WebUI có giao tiếp chính xác với `NetworkManager.cpp` không.
   - Theo dõi việc lưu trữ Preferences khi submit Form (WiFi, Hẹn Giờ).
+  - Build xác nhận cả hai môi trường `pio run -e blynk` và `pio run -e rainmaker` trước khi flash.
+- **Kế hoạch tiếp tục ở phiên sau**:
+  1. **Xác nhận compile thật trên máy dev**
+     - Chạy `pio run -e blynk`
+     - Chạy `pio run -e rainmaker`
+     - Nếu lỗi `pio` trên terminal thường, mở Terminal tích hợp PlatformIO trong VSCode để build.
+  2. **Ưu tiên chốt firmware Blynk trước**
+     - Test first-boot tạo admin.
+     - Test lưu WiFi chính/phụ, reboot, reconnect.
+     - Test lịch Relay 4 và Relay 5 sau khi reload cấu hình.
+     - Test đổi admin, đổi Rescue SSID riêng, đổi OTA/Admin user riêng.
+     - Test OTA qua `/update` sau khi đã claim admin.
+  3. **Hardening bắt buộc trước khi coi là ready-to-flash**
+     - Bỏ log lộ mật khẩu Rescue AP trong `NetworkManager.cpp`.
+     - Thay mật khẩu mặc định Rescue AP yếu trong `Config.h` bằng phương án mạnh hơn.
+     - Giảm/loại `delay()` trong `ControlLogic.cpp`, ưu tiên debounce non-blocking và restart có kiểm soát.
+  4. **Rà soát riêng nhánh RainMaker**
+     - Kiểm tra lại API `esp_wifi_init()` theo đúng core ESP32 hiện dùng.
+     - Rà soát `write_cb_wrapper()` và toàn bộ API RainMaker đang gọi để tránh lỗi compile/runtime.
+     - Xác minh lại luồng provisioning BLE, reconnect WiFi, MQTT connected, và điều kiện bật lại provisioning khi mất mạng.
+     - Chỉ flash RainMaker sau khi compile sạch và pass test luồng provisioning thực tế.
+  5. **Kết luận vận hành mong muốn**
+     - Tạm thời xem **Blynk là firmware ưu tiên để đưa lên board thật trước**.
+     - RainMaker được xem là nhánh cần hardening thêm, không coi là ổn định chỉ dựa trên review code tĩnh.
 - **Quy trình Xử lý Lỗi**:
   - **Lỗi không nhận lệnh `pio`**: Do biến môi trường Windows thiếu đường dẫn PlatformIO. Cách khắc phục: Hãy chủ động mở Terminal tích hợp sẵn của PlatformIO trong VSCode và gõ lệnh build/upload ở đó.
   - **Lỗi giao diện WebUI không hoạt động**: Bật DevTools F12 của trình duyệt, kiểm tra tab Console và Network xem API `fetch()` có bị trả về mã lỗi 400/404/500 không. So sánh chính xác tên các tham số `name="xxx"` ở thẻ input HTML với `request->arg("xxx")` trong C++.
   - **Lỗi Crash / WDT Panic**: Kiểm tra lại nguyên tắc số 3 (Không dùng `delay()` trong callback). Rà soát xung đột mutex/queue giữa WebServer và Core điều khiển.
+  - **Lỗi RainMaker không build/chạy ổn định**: Ưu tiên kiểm tra API ESP-IDF/RainMaker đang dùng có khớp version core ESP32 trong PlatformIO không, đặc biệt ở `esp_wifi_init()`, callback param write, provisioning BLE, và event loop.

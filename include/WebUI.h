@@ -59,12 +59,16 @@ const char setup_html[] PROGMEM = R"rawliteral(
             if (pass !== confirmPass) {
                 errorBox.textContent = "Mật khẩu không khớp. Vui lòng nhập lại!";
                 errorBox.style.display = 'block';
+                btn.textContent = 'Tạo Tài Khoản Admin';
+                btn.disabled = false;
                 return;
             }
 
             if (pass.length < 6) {
                 errorBox.textContent = "Mật khẩu phải có ít nhất 6 ký tự!";
                 errorBox.style.display = 'block';
+                btn.textContent = 'Tạo Tài Khoản Admin';
+                btn.disabled = false;
                 return;
             }
 
@@ -72,8 +76,25 @@ const char setup_html[] PROGMEM = R"rawliteral(
             btn.textContent = "Đang lưu...";
             btn.disabled = true;
 
-            alert(`(Bản Preview Mẫu)\nĐã lưu ảo thành công tài khoản: ${user}\nMật khẩu: ${pass}`);
-            window.location.href = "web_preview_index.html";
+            const fd = new FormData();
+            fd.append('admin_user', user);
+            fd.append('admin_pass', pass);
+
+            fetch('/setup_first_boot', { method: 'POST', body: fd })
+                .then(async res => {
+                    if (!res.ok) {
+                        const msg = await res.text();
+                        throw new Error(msg || 'Không thể tạo tài khoản admin');
+                    }
+                    alert('Tạo tài khoản Admin thành công. Thiết bị sẽ chuyển sang trang đăng nhập cấu hình.');
+                    window.location.href = '/';
+                })
+                .catch(err => {
+                    errorBox.textContent = err.message || 'Có lỗi xảy ra khi lưu tài khoản Admin.';
+                    errorBox.style.display = 'block';
+                    btn.textContent = 'Tạo Tài Khoản Admin';
+                    btn.disabled = false;
+                });
         }
     </script>
 </body>
@@ -235,14 +256,14 @@ const char* index_html = R"rawliteral(
                             <td style="padding: 10px; font-weight: 500; border: 1px solid var(--border); background: #ffffff;">Đèn (R5)</td>
                             <td style="padding: 10px; border: 1px solid var(--border); background: #ffffff; text-align: center;">
                                 <div class="time-flex" style="justify-content: center;">
-                                    <select id="lightOnHour" name="lightOnHour" style="padding: 5px; max-width: 70px;"></select>
-                                    <select id="lightOnMin" name="lightOnMin" style="padding: 5px; max-width: 70px;"></select>
+                                    <select id="lightOnHour" name="l_onHour" style="padding: 5px; max-width: 70px;"></select>
+                                    <select id="lightOnMin" name="l_onMin" style="padding: 5px; max-width: 70px;"></select>
                                 </div>
                             </td>
                             <td style="padding: 10px; border: 1px solid var(--border); background: #ffffff; text-align: center;">
                                 <div class="time-flex" style="justify-content: center;">
-                                    <select id="lightOffHour" name="lightOffHour" style="padding: 5px; max-width: 70px;"></select>
-                                    <select id="lightOffMin" name="lightOffMin" style="padding: 5px; max-width: 70px;"></select>
+                                    <select id="lightOffHour" name="l_offHour" style="padding: 5px; max-width: 70px;"></select>
+                                    <select id="lightOffMin" name="l_offMin" style="padding: 5px; max-width: 70px;"></select>
                                 </div>
                             </td>
                         </tr>
@@ -259,6 +280,19 @@ const char* index_html = R"rawliteral(
                         <label class="day-checkbox"><input type="checkbox" name="day_5" value="1" checked> T6</label>
                         <label class="day-checkbox"><input type="checkbox" name="day_6" value="1" checked> T7</label>
                         <label class="day-checkbox"><input type="checkbox" name="day_0" value="1" checked> CN</label>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>Ngày Áp Dụng cho đèn trong tuần:</label>
+                    <div class="days-grid">
+                        <label class="day-checkbox"><input type="checkbox" name="l_day_1" value="1" checked> T2</label>
+                        <label class="day-checkbox"><input type="checkbox" name="l_day_2" value="1" checked> T3</label>
+                        <label class="day-checkbox"><input type="checkbox" name="l_day_3" value="1" checked> T4</label>
+                        <label class="day-checkbox"><input type="checkbox" name="l_day_4" value="1" checked> T5</label>
+                        <label class="day-checkbox"><input type="checkbox" name="l_day_5" value="1" checked> T6</label>
+                        <label class="day-checkbox"><input type="checkbox" name="l_day_6" value="1" checked> T7</label>
+                        <label class="day-checkbox"><input type="checkbox" name="l_day_0" value="1" checked> CN</label>
                     </div>
                 </div>
                 <button type="submit" class="btn" id="btnSaveSchedule">Lưu Lịch Trình</button>
@@ -301,7 +335,7 @@ const char* index_html = R"rawliteral(
                                 <input type="password" id="password" name="password" placeholder="Mật khẩu 1" style="padding: 8px; width: 100%; box-sizing: border-box;">
                             </td>
                             <td style="padding: 8px; border: 1px solid var(--border);">
-                                <input type="password" id="password2" name="password2" placeholder="Mật khẩu 2" style="padding: 8px; width: 100%; box-sizing: border-box;">
+                                <input type="password" id="password2" name="pass2" placeholder="Mật khẩu 2" style="padding: 8px; width: 100%; box-sizing: border-box;">
                             </td>
                             <td style="padding: 8px; border: 1px solid var(--border); background: #f8fafc;"></td>
                         </tr>
@@ -340,17 +374,18 @@ const char* index_html = R"rawliteral(
 
         <!-- TAB 3: ACCOUNT & SECURITY -->
         <div id="tab-security" class="tab-content">
-            <h2 class="section-title">👤 Đổi Mật Khẩu Admin (WebUI)</h2>
+            <h2 class="section-title">👤 Cập Nhật Tài Khoản Admin (WebUI)</h2>
             <form id="adminForm" onsubmit="saveAdmin(event)">
+                <p style="font-size: 0.9rem; color: #64748b; margin-bottom: 15px;">Bạn có thể đổi tên đăng nhập riêng. Nếu để trống mật khẩu, hệ thống sẽ giữ nguyên mật khẩu Admin hiện tại.</p>
                 <div class="form-group">
-                    <label>Tài khoản Admin mới</label>
-                    <input type="text" placeholder="VD: admin" required>
+                    <label>Tài khoản Admin</label>
+                    <input type="text" id="admin_user_new" name="admin_user" placeholder="VD: admin" required>
                 </div>
                 <div class="form-group">
                     <label>Mật khẩu Admin mới</label>
-                    <input type="password" placeholder="Nhập mật khẩu mới" required>
+                    <input type="password" id="admin_pass_new" name="admin_pass" placeholder="Để trống nếu không muốn đổi mật khẩu">
                 </div>
-                <button type="submit" class="btn" id="btnSaveAdmin">Đổi Thông Tin Đăng Nhập</button>
+                <button type="submit" class="btn" id="btnSaveAdmin">Lưu Tài Khoản Admin</button>
             </form>
 
             <h2 class="section-title" style="margin-top: 30px;">🆘 Quản Lý WiFi Khẩn Cấp (Rescue AP) & OTA</h2>
@@ -501,21 +536,27 @@ const char* index_html = R"rawliteral(
                 if(data.offHour !== undefined) document.getElementById('offHour').value = data.offHour;
                 if(data.offMin !== undefined) document.getElementById('offMin').value = data.offMin;
 
-                if(data.lightOnHour !== undefined) document.getElementById('lightOnHour').value = data.lightOnHour;
-                if(data.lightOnMin !== undefined) document.getElementById('lightOnMin').value = data.lightOnMin;
-                if(data.lightOffHour !== undefined) document.getElementById('lightOffHour').value = data.lightOffHour;
-                if(data.lightOffMin !== undefined) document.getElementById('lightOffMin').value = data.lightOffMin;
+                if(data.l_onHour !== undefined) document.getElementById('lightOnHour').value = data.l_onHour;
+                if(data.l_onMin !== undefined) document.getElementById('lightOnMin').value = data.l_onMin;
+                if(data.l_offHour !== undefined) document.getElementById('lightOffHour').value = data.l_offHour;
+                if(data.l_offMin !== undefined) document.getElementById('lightOffMin').value = data.l_offMin;
 
                 if(document.getElementById('blynkTemplate') && data.blynkTemplate) document.getElementById('blynkTemplate').value = data.blynkTemplate;
                 if(document.getElementById('blynkName') && data.blynkName) document.getElementById('blynkName').value = data.blynkName;
                 if(document.getElementById('blynkAuth') && data.blynkAuth) document.getElementById('blynkAuth').value = data.blynkAuth;
 
                 if(data.rescue_ssid) document.getElementById('rescue_ap_ssid').value = data.rescue_ssid;
-                if(data.ota_user) document.getElementById('ota_user').value = data.ota_user;
+                if(data.admin_user) {
+                    document.getElementById('ota_user').value = data.admin_user;
+                    document.getElementById('admin_user_new').value = data.admin_user;
+                }
 
                 for(let i=0; i<7; i++) {
                     const day = document.querySelector(`input[name="day_${i}"]`);
                     if (day) day.checked = !!(data.days && (data.days & (1 << i)));
+
+                    const lightDay = document.querySelector(`input[name="l_day_${i}"]`);
+                    if (lightDay) lightDay.checked = !!(data.lightScheduleDays && (data.lightScheduleDays & (1 << i)));
                 }
 
                 updateStatus();

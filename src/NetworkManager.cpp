@@ -682,7 +682,8 @@ void NetworkManager::setupWebServer() {
                   ",\"l_offMin\":" + String(netManager.lightOffMin) +
                   ",\"lightScheduleDays\":" + String(netManager.lightScheduleDays) +
                   ",\"device_id\":\"" + netManager.deviceId + "\"" +
-                  ",\"rescue_ssid\":\"" + netManager.safeGetString(netManager.rescueApSsid) + "\"";
+                  ",\"rescue_ssid\":\"" + netManager.safeGetString(netManager.rescueApSsid) + "\"" +
+                  ",\"admin_user\":\"" + netManager.safeGetString(netManager.adminUser) + "\"";
 
 #ifndef USE_RAINMAKER
     json +=       ",\"blynkTemplate\":\"" + maskBlynk(netManager.safeGetString(netManager.blynkTemplate)) + "\"" +
@@ -789,53 +790,85 @@ void NetworkManager::setupWebServer() {
   server.on("/save_admin", ASYNC_POST, [](AsyncWebServerRequest *request){
     if (!netManager.checkAuth(request)) return;
 
-    if(request->hasParam("admin_user", true) && request->hasParam("admin_pass", true)) {
-      String newUser = request->getParam("admin_user", true)->value();
-      String newPass = request->getParam("admin_pass", true)->value();
-      if (!isStrongAdminInput(newUser, newPass)) {
-        return request->send(400, "text/plain", "Admin credentials are too weak.");
-      }
+    if (!request->hasParam("admin_user", true)) {
+      return request->send(400, "text/plain", "Bad Request");
+    }
 
-      Preferences p; p.begin("mydoor", false);
-      p.putString("admin_user", newUser);
-      p.putString("admin_pass", newPass);
+    String newUser = request->getParam("admin_user", true)->value();
+    String newPass = request->hasParam("admin_pass", true)
+      ? request->getParam("admin_pass", true)->value()
+      : "";
+
+    if (newUser.length() < 4) {
+      return request->send(400, "text/plain", "Admin username is too short.");
+    }
+
+    Preferences p; p.begin("mydoor", false);
+    String currentPass = p.getString("admin_pass", "");
+    String finalPass = newPass.length() > 0 ? newPass : currentPass;
+
+    if (!isStrongAdminInput(newUser, finalPass)) {
       p.end();
-      netManager.loadConfig();
-      netManager.syncOtaAuth(); // Đồng bộ ngay lập tức sang OTA
-      request->send(200, "text/plain", "OK");
-    } else request->send(400, "text/plain", "Bad Request");
+      return request->send(400, "text/plain", "Admin credentials are too weak.");
+    }
+
+    p.putString("admin_user", newUser);
+    if (newPass.length() > 0) {
+      p.putString("admin_pass", newPass);
+    }
+    p.end();
+
+    netManager.loadConfig();
+    netManager.syncOtaAuth(); // Đồng bộ ngay lập tức sang OTA
+    request->send(200, "text/plain", "OK");
   });
 
   server.on("/save_rescue_ap", ASYNC_POST, [](AsyncWebServerRequest *request){
     if (!netManager.checkAuth(request)) return;
 
-    if(request->hasParam("rescue_ap_ssid", true) && request->hasParam("rescue_ap_pass", true)) {
-      String newSsid = request->getParam("rescue_ap_ssid", true)->value();
-      String newPass = request->getParam("rescue_ap_pass", true)->value();
+    if (!request->hasParam("rescue_ap_ssid", true)) {
+      return request->send(400, "text/plain", "Bad Request");
+    }
 
-      if (newSsid.length() < 4 || newPass.length() < 8 || !hasSpecialChar(newPass)) {
-        return request->send(400, "text/plain", "SSID hoặc Mật khẩu quá ngắn, hoặc Mật khẩu thiếu ký tự đặc biệt (VD: @, #, $, ...).");
-      }
+    String newSsid = request->getParam("rescue_ap_ssid", true)->value();
+    String newPass = request->hasParam("rescue_ap_pass", true)
+      ? request->getParam("rescue_ap_pass", true)->value()
+      : "";
 
-      Preferences p; p.begin("mydoor", false);
-      p.putString("rescue_ssid", newSsid);
-      p.putString("rescue_pass", newPass);
+    if (newSsid.length() < 4) {
+      return request->send(400, "text/plain", "SSID quá ngắn.");
+    }
+
+    Preferences p; p.begin("mydoor", false);
+    String currentPass = p.getString("rescue_pass", "");
+    String finalPass = newPass.length() > 0 ? newPass : currentPass;
+
+    if (finalPass.length() < 8 || !hasSpecialChar(finalPass)) {
       p.end();
+      return request->send(400, "text/plain", "Mật khẩu Rescue AP quá ngắn hoặc thiếu ký tự đặc biệt (VD: @, #, $, ...).");
+    }
 
-      netManager.safeSetString(netManager.rescueApSsid, newSsid);
+    p.putString("rescue_ssid", newSsid);
+    if (newPass.length() > 0) {
+      p.putString("rescue_pass", newPass);
+    }
+    p.end();
+
+    netManager.safeSetString(netManager.rescueApSsid, newSsid);
+    if (newPass.length() > 0) {
       netManager.safeSetString(netManager.rescueApPass, newPass);
+    }
 
-      request->send(200, "text/plain", "OK");
+    request->send(200, "text/plain", "OK");
 
 #ifndef USE_RAINMAKER
-      if (netManager.isApMode) {
+    if (netManager.isApMode) {
 #endif
-        netManager.pendingReboot = true;
-        netManager.rebootTime = millis();
+      netManager.pendingReboot = true;
+      netManager.rebootTime = millis();
 #ifndef USE_RAINMAKER
-      }
+    }
 #endif
-    } else request->send(400, "text/plain", "Bad Request");
   });
 
   // API Khởi động lại
