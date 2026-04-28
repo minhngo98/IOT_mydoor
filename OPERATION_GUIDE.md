@@ -7,7 +7,7 @@ Tài liệu này hướng dẫn cách cài đặt, vận hành và kiểm thử 
 ## 1. VẬN HÀNH QUA WEB CONFIG (MẠNG NỘI BỘ)
 *Chỉ dùng khi mất mạng hoặc thiết bị mới tinh (First Boot).*
 
-*   **Truy cập Rescue AP (Khi mất mạng):** Nếu hệ thống mất kết nối cả 2 mạng WiFi (Mạng chính và Mạng phụ) quá 5 phút, thiết bị sẽ tự động phát WiFi cấu hình. Tên và Mật khẩu WiFi này là do bạn tự cài đặt trước đó, hoặc sẽ dùng mặc định là `MyDoor-xxxxxx` (Mật khẩu: `12345678`) nếu bạn chưa đổi.
+*   **Truy cập Rescue AP (Khi mất mạng):** Nếu hệ thống mất kết nối cả 2 mạng WiFi (Mạng chính và Mạng phụ) quá 5 phút, thiết bị sẽ tự động phát WiFi cấu hình. Tên và Mật khẩu WiFi này là do bạn tự cài đặt trước đó, hoặc sẽ dùng mặc định là `SmartHomebyMinh` (Mật khẩu: `04011998`) nếu bạn chưa đổi.
 *   **Trang cấu hình (WebUI):** Dùng điện thoại kết nối vào WiFi Rescue AP, mở trình duyệt vào địa chỉ `http://10.10.10.1`.
 *   **Đăng ký Admin (First Boot):** Nếu là máy mới, trang web sẽ bắt buộc bạn tạo 1 tài khoản `Admin` và `Password` (Pass phải > 8 ký tự). Tài khoản này dùng để đăng nhập WebUI và OTA sau này.
 *   **Cài đặt thông số:**

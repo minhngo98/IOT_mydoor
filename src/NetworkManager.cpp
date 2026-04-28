@@ -350,10 +350,8 @@ void NetworkManager::setupAP() {
   IPAddress subnet(255, 255, 255, 0);
   WiFi.softAPConfig(local_ip, gateway, subnet);
 
-  // Ghi đè pass tạm thời và hiện SSID để dễ kết nối
-  rescueApPass = "12345678";
   WiFi.softAP(rescueApSsid.c_str(), rescueApPass.c_str(), 1, 0);
-  Serial.println("[AP] Rescue AP dang hoat dong. Hidden=0, Pass=12345678, IP: 10.10.10.1");
+  Serial.printf("[AP] Rescue AP dang hoat dong. SSID: %s, Pass: %s, IP: 10.10.10.1\n", rescueApSsid.c_str(), rescueApPass.c_str());
 
   if (ssid != "") {
       WiFi.begin(ssid.c_str(), password.c_str());
