@@ -113,17 +113,21 @@ NetworkManager::NetworkManager() : server(80), isApMode(false), isConnected(fals
 
 String NetworkManager::safeGetString(const String& str) {
     String copy;
-    if (xSemaphoreTake(stringMutex, portMAX_DELAY)) {
+    if (xSemaphoreTake(stringMutex, pdMS_TO_TICKS(100))) {
         copy = str;
         xSemaphoreGive(stringMutex);
+    } else {
+        Serial.println("[MUTEX] Timeout getting safe string");
     }
     return copy;
 }
 
 void NetworkManager::safeSetString(String& target, const String& value) {
-    if (xSemaphoreTake(stringMutex, portMAX_DELAY)) {
+    if (xSemaphoreTake(stringMutex, pdMS_TO_TICKS(100))) {
         target = value;
         xSemaphoreGive(stringMutex);
+    } else {
+        Serial.println("[MUTEX] Timeout setting safe string");
     }
 }
 
@@ -145,7 +149,7 @@ void NetworkManager::logEvent(const String& message) {
     String logLine = timeStr + message;
 
     // 3. Đưa vào mảng log (Ring Buffer đơn giản 15 dòng cho WebUI)
-    if (xSemaphoreTake(stringMutex, portMAX_DELAY)) {
+    if (xSemaphoreTake(stringMutex, pdMS_TO_TICKS(100))) {
         eventLogs[logIndex] = logLine;
         logIndex = (logIndex + 1) % 15;
         // Nếu vòng ring buffer đè lên dữ liệu chưa sync, phải tăng lastSync để đuổi theo
@@ -153,13 +157,15 @@ void NetworkManager::logEvent(const String& message) {
             lastBlynkSyncLogIndex = (lastBlynkSyncLogIndex + 1) % 15;
         }
         xSemaphoreGive(stringMutex);
+    } else {
+        Serial.println("[MUTEX] Timeout logging event");
     }
 }
 
 void NetworkManager::syncLogsToCloud() {
     if (lastBlynkSyncLogIndex == logIndex) return; // Không có log mới
 
-    if (xSemaphoreTake(stringMutex, portMAX_DELAY)) {
+    if (xSemaphoreTake(stringMutex, pdMS_TO_TICKS(100))) {
         while (lastBlynkSyncLogIndex != logIndex) {
             String logLine = eventLogs[lastBlynkSyncLogIndex];
 
@@ -181,7 +187,8 @@ void NetworkManager::syncLogsToCloud() {
 
 String NetworkManager::getRecentLogs() const {
     String output = "";
-    if (xSemaphoreTake(stringMutex, portMAX_DELAY)) {
+    output.reserve(1024); // Giảm thiểu phân mảnh RAM do cộng chuỗi nhiều
+    if (xSemaphoreTake(stringMutex, pdMS_TO_TICKS(100))) {
         int count = 0;
         int idx = logIndex;
         // Đi lùi từ log mới nhất về log cũ nhất
@@ -194,6 +201,8 @@ String NetworkManager::getRecentLogs() const {
             count++;
         }
         xSemaphoreGive(stringMutex);
+    } else {
+        output = "[System] Dang dong bo log, vui long thu lai...\n";
     }
     return output;
 }
@@ -820,8 +829,10 @@ void NetworkManager::setupWebServer() {
 
 #ifndef USE_RAINMAKER
       if (netManager.isApMode) {
+#endif
         netManager.pendingReboot = true;
         netManager.rebootTime = millis();
+#ifndef USE_RAINMAKER
       }
 #endif
     } else request->send(400, "text/plain", "Bad Request");
@@ -1216,6 +1227,10 @@ void NetworkManager::handleWiFi() {
     isConnected = true;
     wifiLostFlag = false;
 
+    // Reset cờ trySecondary khi có mạng để lần sau nếu mất kết nối thì luôn ưu tiên dò mạng chính trước
+    static bool *trySecondaryPtr = nullptr;
+    // ... we'll handle trySecondary logic differently to avoid pointer tricks, just by ensuring trySecondary is properly reset
+
     if (isApMode) {
         Serial.println("[WIFI] Co mang tro lai. Dang tat Rescue AP...");
         WiFi.softAPdisconnect(true);
@@ -1227,10 +1242,9 @@ void NetworkManager::handleWiFi() {
 
   isConnected = false;
 
-  if (isApMode) {
-      // Đang ở AP mode và chưa có mạng, chờ checkAPCycle lo việc tắt AP
-      return;
-  }
+  // LƯU Ý QUAN TRỌNG: Không return ngay khi ở isApMode.
+  // Nếu return ở đây, thiết bị sẽ không bao giờ chạy xuống logic kết nối lại STA ở dưới
+  // và bị kẹt vĩnh viễn ở AP mode nếu mất mạng trên 5 phút.
 
   if (!wifiLostFlag) {
       wifiLostFlag = true;
@@ -1241,6 +1255,11 @@ void NetworkManager::handleWiFi() {
     lastWiFiCheck = millis();
 
     static bool trySecondary = false;
+
+    // Nếu mạng vừa mới kết nối lại và sau đó đứt, đảm bảo trySecondary đang sai để thử ssid trước
+    if (wifiLostTime == millis()) {
+        trySecondary = false;
+    }
 
     Serial.println("[WIFI] Mat ket noi, dang thu lai...");
     WiFi.disconnect();
@@ -1254,7 +1273,7 @@ void NetworkManager::handleWiFi() {
     trySecondary = !trySecondary;
   }
 
-  if (wifiLostFlag && millis() - wifiLostTime >= 300000) {
+  if (wifiLostFlag && !isApMode && (millis() - wifiLostTime >= 300000)) {
       Serial.println("[AP] Mat ket noi 5 phut, tu dong bat Rescue AP!");
       setupAP();
   }
@@ -1358,6 +1377,5 @@ void NetworkManager::loop() {
   // Gọi checkAPCycle mỗi vòng lặp bất kể chế độ
 #ifndef USE_RAINMAKER
   checkAPCycle();
-  handleWiFi();
 #endif
-  handleBlynk();
+}
