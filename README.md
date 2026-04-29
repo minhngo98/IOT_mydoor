@@ -47,7 +47,7 @@ MyDoor IoT là Firmware cấp công nghiệp (Professional Grade) điều khiể
 Sơ đồ nguyên lý toàn bộ hệ thống được thiết kế bằng QElectroTech. Xem chi tiết tại `docs/all_diagram_electric.svg`.
 
 <p align="center">
-  <img src="docs/alll_diagram_electric.svg" width="100%" alt="Sơ đồ nguyên lý MyDoor IoT">
+  <img src="docs/all_diagram_electric.svg" width="100%" alt="Sơ đồ nguyên lý MyDoor IoT">
 </p>
 
 *luồng xử lý và phân bổ Core tại tài liệu [Software Architecture](docs/software_architecture.md).*
