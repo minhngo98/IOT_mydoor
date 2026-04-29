@@ -1,4 +1,5 @@
 #include "ControlLogic.h"
+#include "NetworkManager.h"
 
 namespace {
 RTC_DATA_ATTR uint32_t rtcPowerStateMagic = 0;
@@ -9,7 +10,10 @@ RTC_DATA_ATTR bool rtcLightState = false;
 
 constexpr uint32_t RTC_POWER_STATE_MAGIC = 0x4D445057;
 constexpr uint32_t RTC_LIGHT_STATE_MAGIC = 0x4C494748;
+constexpr unsigned long LIGHT_BUTTON_DEBOUNCE_MS = 50;
 }
+
+static unsigned long g_lastLightInterruptMs = 0;
 
 // ISR cho Nút bật/tắt đèn cứng
 void IRAM_ATTR isrBtnLight() {
@@ -173,6 +177,12 @@ void ControlLogic::processPendingCommand() {
             case CMD_LIGHT_OFF:
                 toggleLight(false);
                 break;
+            case CMD_POWER_ON:
+                togglePowerBox(true);
+                break;
+            case CMD_POWER_OFF:
+                togglePowerBox(false);
+                break;
             default:
                 break;
         }
@@ -210,7 +220,6 @@ void ControlLogic::checkDailyReboot() {
     // Khởi động lại hệ thống vào lúc 03:00 sáng
     if (h == DAILY_REBOOT_HOUR && m == 0 && !isRelayActive) {
         Serial.println("\n[MAINTENANCE] Dang thuc hien Daily Reboot luc 3:00 AM...");
-        delay(1000);
         ESP.restart();
     }
 }
@@ -221,19 +230,21 @@ void ControlLogic::monitorHeap() {
     uint32_t freeHeap = ESP.getFreeHeap();
     if (freeHeap < MIN_FREE_HEAP) {
         Serial.printf("\n[CRITICAL] Free Heap qua thap (%d bytes)! Dang Reboot bao ve RAM...\n", freeHeap);
-        delay(500);
         ESP.restart();
     }
 }
 
 void ControlLogic::loop() {
-    // Xử lý Ngắt Nút Nhấn Đèn (Debounce cơ bản trong Loop)
+    // Xử lý Ngắt Nút Nhấn Đèn (Debounce non-blocking)
     if (interruptBtnLightTriggered) {
         interruptBtnLightTriggered = false;
-        delay(50); // Simple debounce
-        if (digitalRead(PIN_BTN_LIGHT) == LOW) {
-            toggleLight(!currentLightState);
-            Serial.printf("[CONTROL] Nut nhan Den duoc an. Trang thai moi: %s\n", currentLightState ? "ON" : "OFF");
+        unsigned long now = millis();
+        if ((now - g_lastLightInterruptMs) >= LIGHT_BUTTON_DEBOUNCE_MS) {
+            g_lastLightInterruptMs = now;
+            if (digitalRead(PIN_BTN_LIGHT) == LOW) {
+                toggleLight(!currentLightState);
+                Serial.printf("[CONTROL] Nut nhan Den duoc an. Trang thai moi: %s\n", currentLightState ? "ON" : "OFF");
+            }
         }
     }
 
@@ -256,6 +267,4 @@ void ControlLogic::loop() {
         checkDailyReboot();
     }
 
-    // Thêm delay ngắn để nhường CPU cho Watchdog
-    vTaskDelay(pdMS_TO_TICKS(10));
 }

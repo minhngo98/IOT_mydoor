@@ -1,70 +1,35 @@
-# Hướng dẫn dành cho Claude trong dự án MyDoor IoT
+# Hướng dẫn Claude cho MyDoor IoT (Bản rút gọn)
 
-## 1. Lệnh thường dùng (Build & Flash)
-- **Build Firmware Blynk**: `pio run -e blynk`
-- **Build Firmware RainMaker**: `pio run -e rainmaker`
-- **Upload Firmware Blynk**: `pio run -e blynk -t upload`
-- **Upload Firmware RainMaker**: `pio run -e rainmaker -t upload`
-- **Xóa sạch Flash (Erase NVS)**: `pio run -t erase` (hoặc cấu hình `extra_scripts = pre:scripts/erase_nvs.py` trong platformio.ini)
+## 1) Lệnh chuẩn
+- Build Blynk: `python -m platformio run -e blynk`
+- Build RainMaker: `python -m platformio run -e rainmaker`
+- Upload Blynk: `python -m platformio run -e blynk -t upload`
+- Upload RainMaker: `python -m platformio run -e rainmaker -t upload`
+- Clean: `python -m platformio run -e <env> -t clean`
 
-## 2. Kiến trúc Hệ thống (Architecture Guidelines)
-- **Dual-Core FreeRTOS**: 
-  - `Core 0`: Dành riêng cho xử lý Mạng, WebServer (ESPAsyncWebServer), Cloud (Blynk/RainMaker), OTA, NTP. Tất cả phải là **Non-blocking**.
-  - `Core 1`: Dành riêng cho điều khiển Phần cứng (Relay, Nút bấm). Đảm bảo tính Real-time tuyệt đối, độ trễ 0ms.
-- **An toàn Đa luồng (Thread-Safety)**: 
-  - Mọi giao tiếp từ Core 0 sang Core 1 phải thông qua `QueueHandle_t` (ví dụ: `commandQueue`). Không được gọi trực tiếp hàm điều khiển phần cứng từ luồng của WebServer/Cloud.
-  - Thao tác trên các biến dùng chung (ví dụ: chuỗi Log) phải được bảo vệ bằng `SemaphoreHandle_t` (Mutex).
-- **Dual-Firmware (NVS Coexistence)**: 
-  - Dự án dùng chung mã nguồn, phân tách qua Macro (`#ifdef USE_BLYNK`, `#ifdef USE_RAINMAKER`).
-  - Dữ liệu mạng fallback và trạng thái Relay luôn lưu ở `Preferences` (namespace `mydoor`), phân vùng này dùng chung cho cả 2 Firmware để đảm bảo đổi Firmware OTA không bị mất dữ liệu cơ bản. RainMaker dùng vùng NVS mặc định (yêu cầu phân vùng 6000 bytes) cho chứng chỉ riêng.
+## 2) Kiến trúc bắt buộc
+- Core 0: Network/Web/Cloud/OTA (non-blocking)
+- Core 1: Relay & IO thời gian thực
+- Core 0 -> Core 1 chỉ qua queue (`executeRemoteCommand`), không gọi relay trực tiếp từ cloud/web callback.
 
-## 3. Tiêu chuẩn Code (Coding Conventions)
-- **Tuyệt đối Không dùng `delay()`**: Trong các API Callback của WebServer (`ESPAsyncWebServer`), không sử dụng hàm `delay()`. Mọi độ trễ bắt buộc phải dùng Cờ trạng thái (Flags) + `millis()` trong hàm `loop()` để không làm đóng băng luồng `async_tcp` gây WDT Panic.
-- **Zero-Glitch Boot**: Các chân GPIO điều khiển Relay (`PIN_RELAY_UP`, `PIN_RELAY_DOWN`, `PIN_RELAY_STOP`, `PIN_RELAY_POWER`, `PIN_RELAY_LIGHT`) phải được khởi tạo và chốt cứng mức an toàn (OFF) ngay trong hàm `ControlLogic::initGPIO()` trước khi bất kỳ tiến trình FreeRTOS nào khởi chạy.
-- **Phòng chống Brick khi OTA**: Khi đang có tiến trình nạp Firmware OTA (ElegantOTA), bắt buộc phải set cờ `isOtaRunning = true` để tạm ngưng hệ thống giám sát tràn RAM (`monitorHeap`), tránh việc thiết bị tự Reboot giữa lúc đang Flash làm hỏng bộ nhớ.
-- **Log Event (Nhật ký)**: Mọi sự kiện của hệ thống phải được lưu qua hàm `logEvent()`. Hàm này đẩy log vào mảng RAM Ring-buffer (15 dòng) để hiển thị trên WebUI. Việc đồng bộ log lên Cloud phải được tách riêng (dùng `syncLogsToCloud()`) và chỉ gọi ở luồng Core 0 để tránh Crash thư viện Blynk.
+## 3) Trạng thái hiện tại đã chốt
+- Build pass: `blynk`, `rainmaker`.
+- `platformio.ini` đã tách deps theo env.
+- RainMaker đã compile theo API core hiện tại.
+- RainMaker không bật local WebUI runtime (gọi `setupWebServer()` chỉ khi `USE_LOCAL_WEB_STACK`).
+- RainMaker có recovery mất mạng dài hạn: tự restart provisioning và tự dừng khi có IP lại.
+- RainMaker state cửa không còn hardcode `STOPPED`; đã suy diễn theo lệnh gần nhất (`UP/DOWN/STOPPED`).
+- Blynk giữ lockout 30 phút, guard replay sau reconnect, OTA auth đồng bộ theo admin.
+- UI first-boot đã đồng bộ policy mật khẩu >= 8 ký tự.
 
-## 4. Bảo mật & Fallback (Security & Resilience)
-- **First Boot Setup**: Bắt buộc người dùng tạo tài khoản Admin ở lần khởi động đầu tiên (hoặc sau khi Factory Reset). Không hard-code tài khoản mặc định vào ROM.
-- **Khôi phục Mạng Khẩn Cấp (Rescue AP)**: Khi mất kết nối WiFi quá 5 phút, hệ thống sẽ tự phát Rescue AP (với Blynk) hoặc bật lại BLE Provisioning (với RainMaker). Khi mạng có lại, phải tự động dập tắt ngay lập tức kết nối khẩn cấp này để bảo mật.
-- **Rate Limiting**: Các endpoint cần xác thực (checkAuth) phải khóa 30 phút nếu đăng nhập sai 5 lần để chống Brute-force.
-- **Tự Phục Hồi**: Hệ thống phải có Hardware Watchdog (WDT) và Daily Reboot vào 3 AM để làm sạch phân mảnh RAM.
+## 4) Rule bảo mật/vận hành
+- Không dùng `delay()` trong callback web async.
+- Giữ `isOtaRunning` khi OTA để tránh reboot giữa chừng.
+- Log hệ thống qua `logEvent()`.
+- Giữ branding Rescue AP mặc định:
+  - SSID: `SmartHomebyMinh`
+  - Pass: `04011998`
 
-## 5. Lịch sử & Quy trình Phát triển Hiện tại
-- **Đã hoàn thành**: 
-  - Thiết kế và hoàn thiện giao diện WebUI (Mock HTML) theo chuẩn UI/UX nhẹ, gọn, Responsive.
-  - Đã tích hợp bản Web Preview (`web_preview_index.html`, `web_preview_setup.html`) vào mã nguồn C++ (`include/WebUI.h`).
-  - Đã chuyển đổi toàn bộ Javascript mô phỏng sang sử dụng `fetch()` gọi các endpoint thật trên ESP32 (`/power`, `/light`, `/control`, `/save_wifi`, `/save_schedule`, `/save_rescue_ap`, `/save_admin`, `/get_config`, `/logs`).
-  - Đã sửa đồng bộ WebUI ↔ backend cho các lỗi lớn: first-boot setup admin, `pass2` WiFi dự phòng, form admin, lịch đèn `l_onHour/l_onMin/l_offHour/l_offMin`, `l_day_*`, preload `admin_user`, và cập nhật từng phần cho Rescue AP / OTA khi để trống mật khẩu.
-- **Bước tiếp theo**: 
-  - Nạp firmware vào ESP32 thật thông qua PlatformIO để kiểm thử end-to-end các API WebUI có giao tiếp chính xác với `NetworkManager.cpp` không.
-  - Theo dõi việc lưu trữ Preferences khi submit Form (WiFi, Hẹn Giờ).
-  - Build xác nhận cả hai môi trường `pio run -e blynk` và `pio run -e rainmaker` trước khi flash.
-- **Kế hoạch tiếp tục ở phiên sau**:
-  1. **Xác nhận compile thật trên máy dev**
-     - Chạy `pio run -e blynk`
-     - Chạy `pio run -e rainmaker`
-     - Nếu lỗi `pio` trên terminal thường, mở Terminal tích hợp PlatformIO trong VSCode để build.
-  2. **Ưu tiên chốt firmware Blynk trước**
-     - Test first-boot tạo admin.
-     - Test lưu WiFi chính/phụ, reboot, reconnect.
-     - Test lịch Relay 4 và Relay 5 sau khi reload cấu hình.
-     - Test đổi admin, đổi Rescue SSID riêng, đổi OTA/Admin user riêng.
-     - Test OTA qua `/update` sau khi đã claim admin.
-  3. **Hardening bắt buộc trước khi coi là ready-to-flash**
-     - Bỏ log lộ mật khẩu Rescue AP trong `NetworkManager.cpp`.
-     - Thay mật khẩu mặc định Rescue AP yếu trong `Config.h` bằng phương án mạnh hơn.
-     - Giảm/loại `delay()` trong `ControlLogic.cpp`, ưu tiên debounce non-blocking và restart có kiểm soát.
-  4. **Rà soát riêng nhánh RainMaker**
-     - Kiểm tra lại API `esp_wifi_init()` theo đúng core ESP32 hiện dùng.
-     - Rà soát `write_cb_wrapper()` và toàn bộ API RainMaker đang gọi để tránh lỗi compile/runtime.
-     - Xác minh lại luồng provisioning BLE, reconnect WiFi, MQTT connected, và điều kiện bật lại provisioning khi mất mạng.
-     - Chỉ flash RainMaker sau khi compile sạch và pass test luồng provisioning thực tế.
-  5. **Kết luận vận hành mong muốn**
-     - Tạm thời xem **Blynk là firmware ưu tiên để đưa lên board thật trước**.
-     - RainMaker được xem là nhánh cần hardening thêm, không coi là ổn định chỉ dựa trên review code tĩnh.
-- **Quy trình Xử lý Lỗi**:
-  - **Lỗi không nhận lệnh `pio`**: Do biến môi trường Windows thiếu đường dẫn PlatformIO. Cách khắc phục: Hãy chủ động mở Terminal tích hợp sẵn của PlatformIO trong VSCode và gõ lệnh build/upload ở đó.
-  - **Lỗi giao diện WebUI không hoạt động**: Bật DevTools F12 của trình duyệt, kiểm tra tab Console và Network xem API `fetch()` có bị trả về mã lỗi 400/404/500 không. So sánh chính xác tên các tham số `name="xxx"` ở thẻ input HTML với `request->arg("xxx")` trong C++.
-  - **Lỗi Crash / WDT Panic**: Kiểm tra lại nguyên tắc số 3 (Không dùng `delay()` trong callback). Rà soát xung đột mutex/queue giữa WebServer và Core điều khiển.
-  - **Lỗi RainMaker không build/chạy ổn định**: Ưu tiên kiểm tra API ESP-IDF/RainMaker đang dùng có khớp version core ESP32 trong PlatformIO không, đặc biệt ở `esp_wifi_init()`, callback param write, provisioning BLE, và event loop.
+## 5) Việc kế tiếp (ngoài code)
+- Soak test board thật cho cả Blynk và RainMaker theo checklist runtime.
+- Nếu public GitHub/CV: ưu tiên mô tả kiến trúc, test matrix, và ảnh thực tế vận hành.

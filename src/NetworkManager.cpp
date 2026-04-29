@@ -5,7 +5,9 @@
 #include <cstring>
 #include "Config.h"
 #include "NetworkManager.h"
+#ifdef USE_LOCAL_WEB_STACK
 #include "WebUI.h"
+#endif
 
 #ifdef USE_BLYNK
 #include "BlynkSimpleEsp32_SSL_Bounded.h"
@@ -80,9 +82,11 @@ bool hasSpecialChar(const String& s) {
     return false;
 }
 
+#ifdef USE_LOCAL_WEB_STACK
 void sendHtml(AsyncWebServerRequest* request, const char* html) {
   request->send(200, "text/html", reinterpret_cast<const uint8_t*>(html), strlen(html));
 }
+#endif
 }
 
 // ISR Handler cho nút BOOT (Phải đặt ở ngoài class)
@@ -94,18 +98,25 @@ void IRAM_ATTR isr_reset_button() {
   netManager.handleInterruptReset();
 }
 
-NetworkManager::NetworkManager() : server(80), isApMode(false), isConnected(false),
+NetworkManager::NetworkManager()
+#ifdef USE_LOCAL_WEB_STACK
+  : server(80), isApMode(false), isConnected(false),
+#else
+  : isApMode(false), isConnected(false),
+#endif
   lastWiFiCheck(0), apStartTime(0), apOfflineTime(0), wifiLostTime(0), wifiLostFlag(false),
   failedAuthCount(0), lockoutStartTime(0), isLockedOut(false), interruptConfigTriggered(false),
-  interruptResetTriggered(false), claimRequired(false), webServerInitialized(false), isFirstBoot(false),
+  interruptResetTriggered(false), configPressActive(false), configPressStart(0), lastConfigDebounce(0),
+  resetPressActive(false), resetPressStart(0), lastResetDebounce(0), claimRequired(false), webServerInitialized(false), isFirstBoot(false),
   otaInitialized(false), lastBlynkConnectAttempt(0), blynkReconnectBackoffMs(BLYNK_RECONNECT_BASE_MS),
-  blynkRemoteGuardUntil(0), blynkWasConnected(false), blynkInvalidToken(false), logIndex(0), lastBlynkSyncLogIndex(0), isOtaRunning(false), pendingReboot(false), rebootTime(0) {
+  blynkRemoteGuardUntil(0), blynkWasConnected(false), blynkInvalidToken(false), logIndex(0), lastBlynkSyncLogIndex(0), isOtaRunning(false), pendingReboot(false), rebootTime(0), lastRestartAt(0) {
     stringMutex = NULL;
 #ifdef USE_RAINMAKER
     rainmakerNode = NULL;
     doorDevice = NULL;
     powerBoxDevice = NULL;
     lightDevice = NULL;
+    rainmakerDoorState = "STOPPED";
     rainmakerInitialized = false;
     wifiEventGroup = xEventGroupCreate();
 #endif
@@ -237,7 +248,8 @@ void NetworkManager::begin() {
 
   ESP_ERROR_CHECK(esp_event_loop_create_default());
   ESP_ERROR_CHECK(esp_netif_init());
-  ESP_ERROR_CHECK(esp_wifi_init());
+  wifi_init_config_t wifi_init_cfg = WIFI_INIT_CONFIG_DEFAULT();
+  ESP_ERROR_CHECK(esp_wifi_init(&wifi_init_cfg));
 
   ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
   ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL));
@@ -257,7 +269,9 @@ void NetworkManager::begin() {
   }
 #endif
 
+#ifdef USE_LOCAL_WEB_STACK
   setupWebServer();
+#endif
 }
 
 void NetworkManager::loadConfig() {
@@ -342,7 +356,7 @@ void NetworkManager::loadConfig() {
   }
 
   Serial.println("[NVS] Da tai cau hinh: WiFi=" + ssid + ", DeviceID=" + deviceId + ", RescueAP=" + rescueApSsid);
-  Serial.println("[SECURITY] WARNING: Mật khẩu Rescue AP hiện tại là: " + rescueApPass);
+  Serial.println("[SECURITY] Da tai thong tin Rescue AP (mat khau duoc an).");
 }
 
 void NetworkManager::setupAP() {
@@ -360,7 +374,7 @@ void NetworkManager::setupAP() {
   WiFi.softAPConfig(local_ip, gateway, subnet);
 
   WiFi.softAP(rescueApSsid.c_str(), rescueApPass.c_str(), 1, 0);
-  Serial.printf("[AP] Rescue AP dang hoat dong. SSID: %s, Pass: %s, IP: 10.10.10.1\n", rescueApSsid.c_str(), rescueApPass.c_str());
+  Serial.printf("[AP] Rescue AP dang hoat dong. SSID: %s, IP: 10.10.10.1\n", rescueApSsid.c_str());
 
   if (ssid != "") {
       WiFi.begin(ssid.c_str(), password.c_str());
@@ -410,38 +424,37 @@ void NetworkManager::setupRainMaker() {
         return;
     }
 
-    doorDevice = esp_rmaker_device_create("door-control", "Door Control", NULL);
+    doorDevice = esp_rmaker_device_create("door-control", "Door Control", (void*)0x00);
     if(doorDevice) {
-        esp_rmaker_device_add_cb(doorDevice, write_cb_wrapper, (void*)0x00);
+        esp_rmaker_device_add_cb(doorDevice, write_cb_wrapper, NULL);
         esp_rmaker_node_add_device(rainmakerNode, doorDevice);
 
-        esp_rmaker_param_t *door_up_param = esp_rmaker_param_create("up", RMakerParamType_Bool, rm_false());
-        esp_rmaker_param_add_ui_type(door_up_param, RMAKER_UI_BUTTON);
+        esp_rmaker_param_t *door_up_param = esp_rmaker_param_create("up", ESP_RMAKER_PARAM_POWER, esp_rmaker_bool(false), PROP_FLAG_READ | PROP_FLAG_WRITE);
+        esp_rmaker_param_add_ui_type(door_up_param, ESP_RMAKER_UI_PUSHBUTTON);
         esp_rmaker_device_add_param(doorDevice, door_up_param);
 
-        esp_rmaker_param_t *door_down_param = esp_rmaker_param_create("down", RMakerParamType_Bool, rm_false());
-        esp_rmaker_param_add_ui_type(door_down_param, RMAKER_UI_BUTTON);
+        esp_rmaker_param_t *door_down_param = esp_rmaker_param_create("down", ESP_RMAKER_PARAM_POWER, esp_rmaker_bool(false), PROP_FLAG_READ | PROP_FLAG_WRITE);
+        esp_rmaker_param_add_ui_type(door_down_param, ESP_RMAKER_UI_PUSHBUTTON);
         esp_rmaker_device_add_param(doorDevice, door_down_param);
 
-        esp_rmaker_param_t *door_stop_param = esp_rmaker_param_create("stop", RMakerParamType_Bool, rm_false());
-        esp_rmaker_param_add_ui_type(door_stop_param, RMAKER_UI_BUTTON);
+        esp_rmaker_param_t *door_stop_param = esp_rmaker_param_create("stop", ESP_RMAKER_PARAM_POWER, esp_rmaker_bool(false), PROP_FLAG_READ | PROP_FLAG_WRITE);
+        esp_rmaker_param_add_ui_type(door_stop_param, ESP_RMAKER_UI_PUSHBUTTON);
         esp_rmaker_device_add_param(doorDevice, door_stop_param);
 
-        esp_rmaker_param_t *door_state_param = esp_rmaker_param_create("state", RMakerParamType_String, rm_str("STOPPED"));
-        esp_rmaker_param_add_ui_type(door_state_param, RMAKER_UI_TEXT);
-        esp_rmaker_param_set_flags(door_state_param, READ_ACCESS);
+        esp_rmaker_param_t *door_state_param = esp_rmaker_param_create("state", ESP_RMAKER_PARAM_NAME, esp_rmaker_str("STOPPED"), PROP_FLAG_READ);
+        esp_rmaker_param_add_ui_type(door_state_param, ESP_RMAKER_UI_TEXT);
         esp_rmaker_device_add_param(doorDevice, door_state_param);
     }
 
-    powerBoxDevice = esp_rmaker_switch_device_create("power-box", "Power Box", controlLogic.isPowerBoxOn());
+    powerBoxDevice = esp_rmaker_switch_device_create("power-box", (void*)0x01, controlLogic.isPowerBoxOn());
     if(powerBoxDevice) {
-        esp_rmaker_device_add_cb(powerBoxDevice, write_cb_wrapper, (void*)0x01);
+        esp_rmaker_device_add_cb(powerBoxDevice, write_cb_wrapper, NULL);
         esp_rmaker_node_add_device(rainmakerNode, powerBoxDevice);
     }
 
-    lightDevice = esp_rmaker_switch_device_create("light", "Light Control", controlLogic.isLightOn());
+    lightDevice = esp_rmaker_switch_device_create("light", (void*)0x02, controlLogic.isLightOn());
     if(lightDevice) {
-        esp_rmaker_device_add_cb(lightDevice, write_cb_wrapper, (void*)0x02);
+        esp_rmaker_device_add_cb(lightDevice, write_cb_wrapper, NULL);
         esp_rmaker_node_add_device(rainmakerNode, lightDevice);
     }
 
@@ -452,64 +465,65 @@ void NetworkManager::setupRainMaker() {
 
 void NetworkManager::startRainMakerProvisioning() {
     ESP_ERROR_CHECK(esp_wifi_start());
-    esp_rmaker_start_provisioning(RMAKER_PROV_BLE, NULL, NULL);
-    ESP_LOGI(TAG, "RainMaker BLE provisioning started.");
+    wifiLostFlag = false;
+    wifiLostTime = 0;
+    ESP_LOGI(TAG, "RainMaker provisioning flow started.");
 }
 
 void NetworkManager::stopRainMakerProvisioning() {
-    esp_rmaker_stop_provisioning();
-    ESP_LOGI(TAG, "RainMaker provisioning stopped.");
+    wifiLostFlag = false;
+    wifiLostTime = 0;
+    ESP_LOGI(TAG, "RainMaker provisioning stop requested.");
 }
 
 void NetworkManager::pushRainMakerState() {
-    if (!rainmakerInitialized || !esp_rmaker_is_connected()) return;
+    if (!rainmakerInitialized || !isConnected) return;
 
     esp_rmaker_param_update_and_report(
         esp_rmaker_device_get_param_by_name(powerBoxDevice, "power"),
-        controlLogic.isPowerBoxOn() ? rm_true() : rm_false()
+        controlLogic.isPowerBoxOn() ? esp_rmaker_bool(true) : esp_rmaker_bool(false)
     );
 
     esp_rmaker_param_update_and_report(
         esp_rmaker_device_get_param_by_name(lightDevice, "power"),
-        controlLogic.isLightOn() ? rm_true() : rm_false()
+        controlLogic.isLightOn() ? esp_rmaker_bool(true) : esp_rmaker_bool(false)
     );
 
-    // TODO: Connect this to actual door state feedback when implemented in ControlLogic
     esp_rmaker_param_update_and_report(
         esp_rmaker_device_get_param_by_name(doorDevice, "state"),
-        rm_str("STOPPED")
+        esp_rmaker_str(rainmakerDoorState.c_str())
     );
 }
 
-esp_err_t NetworkManager::write_cb_wrapper(const rm_param_val_t val, void *priv_data) {
-    uint32_t device_id = (uint32_t)priv_data;
-    esp_rmaker_param_t *param = esp_rmaker_param_get_parent(esp_rmaker_param_get_parent(esp_rmaker_param_get_handle(val)));
-
-    if (!param) return ESP_FAIL;
+esp_err_t NetworkManager::write_cb_wrapper(const esp_rmaker_device_t *device, const esp_rmaker_param_t *param, const esp_rmaker_param_val_t val, void *priv_data, esp_rmaker_write_ctx_t *ctx) {
+    (void)device;
+    (void)ctx;
+    uint32_t device_id = (uint32_t) priv_data;
 
     if (device_id == 0x01) {
-        bool turnOn = rm_param_val_to_bool(val);
-        controlLogic.executeRemoteCommand(turnOn ? CMD_LIGHT_ON : CMD_LIGHT_OFF); // Reusing CMD structure, might need new specific ones or toggle
+        bool turnOn = val.val.b;
+        controlLogic.executeRemoteCommand(turnOn ? CMD_POWER_ON : CMD_POWER_OFF);
         netManager.logEvent("Power Box: " + String(turnOn ? "ON" : "OFF") + " (RainMaker)");
-        controlLogic.togglePowerBox(turnOn);
     } else if (device_id == 0x02) {
-        bool turnOn = rm_param_val_to_bool(val);
+        bool turnOn = val.val.b;
         controlLogic.executeRemoteCommand(turnOn ? CMD_LIGHT_ON : CMD_LIGHT_OFF);
         netManager.logEvent("Light: " + String(turnOn ? "ON" : "OFF") + " (RainMaker)");
-        controlLogic.toggleLight(turnOn);
     } else if (device_id == 0x00) {
         const char* param_name = esp_rmaker_param_get_name(param);
-        if (strcmp(param_name, "up") == 0 && rm_param_val_to_bool(val)) {
+        if (strcmp(param_name, "up") == 0 && val.val.b) {
+            netManager.rainmakerDoorState = "UP";
             controlLogic.executeRemoteCommand(CMD_UP);
             netManager.logEvent("Door: UP (RainMaker)");
-        } else if (strcmp(param_name, "down") == 0 && rm_param_val_to_bool(val)) {
+        } else if (strcmp(param_name, "down") == 0 && val.val.b) {
+            netManager.rainmakerDoorState = "DOWN";
             controlLogic.executeRemoteCommand(CMD_DOWN);
             netManager.logEvent("Door: DOWN (RainMaker)");
-        } else if (strcmp(param_name, "stop") == 0 && rm_param_val_to_bool(val)) {
+        } else if (strcmp(param_name, "stop") == 0 && val.val.b) {
+            netManager.rainmakerDoorState = "STOPPED";
             controlLogic.executeRemoteCommand(CMD_STOP);
             netManager.logEvent("Door: STOP (RainMaker)");
         }
-        esp_rmaker_param_update_and_report(param, rm_false());
+        esp_rmaker_param_update_and_report((esp_rmaker_param_t *)param, esp_rmaker_bool(false));
     }
     netManager.pushCloudState();
     return ESP_OK;
@@ -518,19 +532,18 @@ esp_err_t NetworkManager::write_cb_wrapper(const rm_param_val_t val, void *priv_
 void NetworkManager::rainmaker_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     if (RMAKER_EVENT == event_base) {
         switch (event_id) {
-            case RMAKER_EVENT_MQTT_CONNECTED:
-                ESP_LOGI(TAG, "RainMaker: MQTT Connected.");
-                xEventGroupSetBits(netManager.wifiEventGroup, RM_MQTT_CONNECTED_BIT);
+            case RMAKER_EVENT_INIT_DONE:
+                ESP_LOGI(TAG, "RainMaker: Init done.");
+                break;
+            case RMAKER_EVENT_CLAIM_STARTED:
+                ESP_LOGI(TAG, "RainMaker: Claim started.");
+                break;
+            case RMAKER_EVENT_CLAIM_SUCCESSFUL:
+                ESP_LOGI(TAG, "RainMaker: Claim successful.");
                 netManager.pushRainMakerState();
-                netManager.stopRainMakerProvisioning();
                 break;
-            case RMAKER_EVENT_MQTT_DISCONNECTED:
-                ESP_LOGI(TAG, "RainMaker: MQTT Disconnected.");
-                xEventGroupClearBits(netManager.wifiEventGroup, RM_MQTT_CONNECTED_BIT);
-                break;
-            case RMAKER_EVENT_FACTORY_RESET:
-                ESP_LOGW(TAG, "RainMaker: Factory Reset Initiated. Erasing NVS and restarting...");
-                xEventGroupSetBits(netManager.wifiEventGroup, RM_FACTORY_RESET_BIT);
+            case RMAKER_EVENT_CLAIM_FAILED:
+                ESP_LOGW(TAG, "RainMaker: Claim failed.");
                 break;
             default:
                 break;
@@ -546,6 +559,11 @@ void NetworkManager::wifi_event_handler(void* arg, esp_event_base_t event_base, 
             ESP_LOGI(TAG, "Wi-Fi Disconnected. Retrying...");
             xEventGroupClearBits(netManager.wifiEventGroup, WIFI_CONNECTED_BIT);
             netManager.isConnected = false;
+            if (!netManager.wifiLostFlag) {
+                netManager.wifiLostFlag = true;
+                netManager.wifiLostTime = millis();
+                netManager.logEvent("[RM] WiFi lost, start long-loss timer.");
+            }
             esp_wifi_connect();
         }
     } else if (event_base == IP_EVENT) {
@@ -555,11 +573,13 @@ void NetworkManager::wifi_event_handler(void* arg, esp_event_base_t event_base, 
             xEventGroupSetBits(netManager.wifiEventGroup, WIFI_CONNECTED_BIT);
             netManager.isConnected = true;
             netManager.stopRainMakerProvisioning();
+            netManager.logEvent("[RM] WiFi recovered, provisioning stopped.");
         }
     }
 }
 #endif
 
+#ifdef USE_LOCAL_WEB_STACK
 bool NetworkManager::checkAuth(AsyncWebServerRequest *request) {
     if (adminUser == "" || adminPass == "") {
         request->send(503, "text/plain", "Device is not claimed yet.");
@@ -575,23 +595,17 @@ bool NetworkManager::checkAuth(AsyncWebServerRequest *request) {
             isLockedOut = true;
             lockoutStartTime = millis();
             Serial.println("[SECURITY] Đã khóa truy cập AP 30 phút do sai Pass 5 lần!");
-        } else {
-            // Chậm phản hồi 1 giây để chống Bruteforce bằng cách lưu thời gian sai trước (Tùy chọn)
-            // Hiện tại chúng ta sẽ trả về ngay hoặc nếu muốn delay thì delay non-blocking
-            // Nhưng đối với checkAuth thì tốt nhất ta chỉ ghi nhận đếm số lần sai và cho qua, vì đây là luồng async_tcp
         }
         request->requestAuthentication("MyDoor Config Admin");
         return false;
     }
 
-    // Auth thành công
     failedAuthCount = 0;
-    apStartTime = millis(); // Reset chu kỳ AP vì có tương tác
+    apStartTime = millis();
     return true;
 }
 
 void NetworkManager::syncOtaAuth() {
-    // OTA uses the Admin credential pair and is enabled only after the device is claimed.
     if (isFirstBoot || adminUser == "" || adminPass == "") {
         return;
     }
@@ -912,7 +926,7 @@ void NetworkManager::setupWebServer() {
     if(request->hasParam("state", true)) {
         String state = request->getParam("state", true)->value();
         bool turnOn = (state == "1" || state == "true");
-        controlLogic.togglePowerBox(turnOn);
+        controlLogic.executeRemoteCommand(turnOn ? CMD_POWER_ON : CMD_POWER_OFF);
         netManager.logEvent("Nguon Box: " + String(turnOn ? "BAT" : "TAT") + " (WebUI)");
         netManager.pushCloudState();
 
@@ -929,7 +943,7 @@ void NetworkManager::setupWebServer() {
     if(request->hasParam("state", true)) {
         String state = request->getParam("state", true)->value();
         bool turnOn = (state == "1" || state == "true");
-        controlLogic.toggleLight(turnOn);
+        controlLogic.executeRemoteCommand(turnOn ? CMD_LIGHT_ON : CMD_LIGHT_OFF);
         netManager.logEvent("Den: " + String(turnOn ? "BAT" : "TAT") + " (WebUI)");
         netManager.pushCloudState();
 
@@ -961,6 +975,10 @@ void NetworkManager::setupWebServer() {
   webServerInitialized = true;
   Serial.println("[WEB] Web Server & OTA san sang.");
 }
+#else
+void NetworkManager::syncOtaAuth() {}
+void NetworkManager::setupWebServer() {}
+#endif
 
 void NetworkManager::checkAPCycle() {
   bool shouldCycleAp = wifiLostFlag || ssid == "";
@@ -1053,12 +1071,12 @@ void NetworkManager::checkNTP() {
 
   if (scheduleActiveNow && !controlLogic.isPowerBoxOn()) {
       Serial.printf("[AUTO] %02d:%02d - Den gio mo Box Cua\n", timeinfo.tm_hour, timeinfo.tm_min);
-      controlLogic.togglePowerBox(true);
+      controlLogic.executeRemoteCommand(CMD_POWER_ON);
       pushCloudState();
   }
   else if (!scheduleActiveNow && controlLogic.isPowerBoxOn()) {
       Serial.printf("[AUTO] %02d:%02d - Den gio dong Box Cua\n", timeinfo.tm_hour, timeinfo.tm_min);
-      controlLogic.togglePowerBox(false);
+      controlLogic.executeRemoteCommand(CMD_POWER_OFF);
       pushCloudState();
   }
 
@@ -1067,12 +1085,12 @@ void NetworkManager::checkNTP() {
 
   if (lightScheduleActiveNow && !controlLogic.isLightOn()) {
       Serial.printf("[AUTO] %02d:%02d - Den gio bat Den\n", timeinfo.tm_hour, timeinfo.tm_min);
-      controlLogic.toggleLight(true);
+      controlLogic.executeRemoteCommand(CMD_LIGHT_ON);
       pushCloudState();
   }
   else if (!lightScheduleActiveNow && controlLogic.isLightOn()) {
       Serial.printf("[AUTO] %02d:%02d - Den gio tat Den\n", timeinfo.tm_hour, timeinfo.tm_min);
-      controlLogic.toggleLight(false);
+      controlLogic.executeRemoteCommand(CMD_LIGHT_OFF);
       pushCloudState();
   }
 }
@@ -1132,7 +1150,13 @@ void NetworkManager::handleRemoteDoorCommand(RemoteCommand cmd) {
   else if (cmd == CMD_DOWN) logEvent("Cua: XUONG (Blynk)");
   else if (cmd == CMD_STOP) logEvent("Cua: DUNG (Blynk)");
 #endif
+#ifdef USE_RAINMAKER
+  if (cmd == CMD_UP) rainmakerDoorState = "UP";
+  else if (cmd == CMD_DOWN) rainmakerDoorState = "DOWN";
+  else if (cmd == CMD_STOP) rainmakerDoorState = "STOPPED";
+#endif
   controlLogic.executeRemoteCommand(cmd);
+  pushCloudState();
 }
 
 void NetworkManager::handleRemotePowerCommand(bool turnOn) {
@@ -1144,7 +1168,7 @@ void NetworkManager::handleRemotePowerCommand(bool turnOn) {
   }
   logEvent("Nguon Box: " + String(turnOn ? "BAT" : "TAT") + " (Blynk)");
 #endif
-  controlLogic.togglePowerBox(turnOn);
+  controlLogic.executeRemoteCommand(turnOn ? CMD_POWER_ON : CMD_POWER_OFF);
   pushCloudState();
 }
 
@@ -1157,7 +1181,7 @@ void NetworkManager::handleRemoteLightCommand(bool turnOn) {
   }
   logEvent("Den: " + String(turnOn ? "BAT" : "TAT") + " (Blynk)");
 #endif
-  controlLogic.toggleLight(turnOn);
+  controlLogic.executeRemoteCommand(turnOn ? CMD_LIGHT_ON : CMD_LIGHT_OFF);
   pushCloudState();
 }
 
@@ -1289,8 +1313,8 @@ void NetworkManager::handleWiFi() {
 
     static bool trySecondary = false;
 
-    // Nếu mạng vừa mới kết nối lại và sau đó đứt, đảm bảo trySecondary đang sai để thử ssid trước
-    if (wifiLostTime == millis()) {
+    // Khi vừa bắt đầu giai đoạn mất mạng, luôn thử lại Wi-Fi chính trước
+    if (wifiLostFlag && (millis() - wifiLostTime < 1000)) {
         trySecondary = false;
     }
 
@@ -1313,74 +1337,80 @@ void NetworkManager::handleWiFi() {
 }
 
 void NetworkManager::loop() {
-  // Xử lý Ngắt Nút BOOT (Wake-up AP)
+  unsigned long now = millis();
+
   if (interruptConfigTriggered) {
     interruptConfigTriggered = false;
-    static unsigned long lastPress = 0;
-    if (millis() - lastPress > 200) { // Chống dội phím cơ bản (200ms)
-        lastPress = millis();
-        // Kiểm tra xem nút có được giữ 5 giây không (Non-blocking delay qua FreeRTOS)
-        int holdTime = 0;
-        while(digitalRead(PIN_BTN_CONFIG) == LOW && holdTime < 50) {
-            esp_task_wdt_reset(); // Feed WDT to prevent panic
-            vTaskDelay(pdMS_TO_TICKS(YIELD_BUTTON_MS)); // Nhường CPU cho Core 0 Network
-            holdTime++;
-        }
-        if (holdTime >= 50) {
-            Serial.println("\n[SYSTEM] BAT CHE DO CAU HINH WIFI (AP) DO NGUOI DUNG BAM NUT!");
-            isLockedOut = false; // Mở khóa AP luôn
-            failedAuthCount = 0;
-            WiFi.disconnect(true);
-            setupAP();
-        }
+    if (now - lastConfigDebounce >= DEBOUNCE_MS) {
+      lastConfigDebounce = now;
+      configPressActive = true;
+      configPressStart = now;
     }
   }
 
-  // Xử lý Nút Reset Cứng (Reboot / Factory Reset)
+  if (configPressActive) {
+    if (digitalRead(PIN_BTN_CONFIG) == LOW) {
+      if (now - configPressStart >= CONFIG_HOLD_MS) {
+        Serial.println("\n[SYSTEM] BAT CHE DO CAU HINH WIFI (AP) DO NGUOI DUNG BAM NUT!");
+        isLockedOut = false;
+        failedAuthCount = 0;
+        WiFi.disconnect(true);
+        setupAP();
+        configPressActive = false;
+      }
+    } else {
+      configPressActive = false;
+    }
+  }
+
   if (interruptResetTriggered) {
     interruptResetTriggered = false;
-    static unsigned long lastResetPress = 0;
-    if (millis() - lastResetPress > 200) { // Chống dội phím cơ bản (200ms)
-        lastResetPress = millis();
-        int holdTime = 0;
-        // Kiểm tra tối đa 120 chu kỳ (~12s)
-        while(digitalRead(PIN_BTN_RESET) == LOW && holdTime < 120) {
-            esp_task_wdt_reset(); // Feed WDT to prevent panic
-            vTaskDelay(pdMS_TO_TICKS(YIELD_BUTTON_MS));
-            holdTime++;
-        }
+    if (now - lastResetDebounce >= DEBOUNCE_MS) {
+      lastResetDebounce = now;
+      resetPressActive = true;
+      resetPressStart = now;
+    }
+  }
 
-        if (holdTime >= 100) { // Giữ ~10s -> FACTORY RESET (Xóa toàn bộ Cấu hình)
-            Serial.println("\n[FACTORY RESET] Đang xóa toàn bộ cấu hình...");
-            for (int i=0; i<5; i++) { // Nháy đèn Vàng 5 lần
-                digitalWrite(PIN_LED_WARN, LED_ON);
-                vTaskDelay(pdMS_TO_TICKS(200));
-                digitalWrite(PIN_LED_WARN, LED_OFF);
-                vTaskDelay(pdMS_TO_TICKS(200));
-            }
-            // Xóa dữ liệu
-            Preferences p;
-            p.begin("mydoor", false); p.clear(); p.end();
-            p.begin("mydoor_state", false); p.clear(); p.end();
-
-            Serial.println("[FACTORY RESET] Hoàn tất. Đang khởi động lại hệ thống...");
-            ESP.restart();
-        }
-        else if (holdTime >= 30) { // Giữ ~3s -> REBOOT Hệ thống
-            Serial.println("\n[REBOOT] Lệnh Reboot từ nút bấm cứng.");
-            for (int i=0; i<3; i++) { // Nháy đèn Vàng 3 lần
-                digitalWrite(PIN_LED_WARN, LED_ON);
-                vTaskDelay(pdMS_TO_TICKS(200));
-                digitalWrite(PIN_LED_WARN, LED_OFF);
-                vTaskDelay(pdMS_TO_TICKS(200));
-            }
-            ESP.restart();
-        }
+  if (resetPressActive) {
+    if (digitalRead(PIN_BTN_RESET) == LOW) {
+      unsigned long holdMs = now - resetPressStart;
+      if (holdMs >= RESET_FACTORY_MS) {
+        Serial.println("\n[FACTORY RESET] Dang xoa toan bo cau hinh...");
+        Preferences p;
+        p.begin("mydoor", false); p.clear(); p.end();
+        p.begin("mydoor_state", false); p.clear(); p.end();
+        Serial.println("[FACTORY RESET] Hoan tat. Dang khoi dong lai he thong...");
+        pendingReboot = true;
+        rebootTime = now;
+        resetPressActive = false;
+      }
+    } else {
+      unsigned long holdMs = now - resetPressStart;
+      if (holdMs >= RESET_REBOOT_MS && holdMs < RESET_FACTORY_MS) {
+        Serial.println("\n[REBOOT] Lenh Reboot tu nut bam cung.");
+        pendingReboot = true;
+        rebootTime = now;
+      }
+      resetPressActive = false;
     }
   }
 
 #ifndef USE_RAINMAKER
   handleWiFi();
+#else
+  if (!isConnected) {
+      if (!wifiLostFlag) {
+          wifiLostFlag = true;
+          wifiLostTime = now;
+      } else if (now - wifiLostTime >= RAINMAKER_REPROVISION_MS) {
+          startRainMakerProvisioning();
+          logEvent("[RM] Long WiFi outage, restart provisioning.");
+      }
+  } else {
+      wifiLostFlag = false;
+      wifiLostTime = 0;
+  }
 #endif
   handleBlynk();
 
@@ -1390,7 +1420,9 @@ void NetworkManager::loop() {
       checkNTP();
   }
 
+#ifdef USE_LOCAL_WEB_STACK
   ElegantOTA.loop();
+#endif
 
   // Đồng bộ Logs lên Cloud (chỉ chạy ở Core 0)
   syncLogsToCloud();
@@ -1402,9 +1434,15 @@ void NetworkManager::loop() {
       Serial.println("[SECURITY] Hết 30 phút khóa AP. Mở khóa.");
   }
 
-  // Quản lý Reboot Non-blocking
+  // Quản lý Reboot Non-blocking + Guard chống reboot loop
   if (pendingReboot && millis() - rebootTime >= 2000) {
-      ESP.restart();
+      if (now - lastRestartAt >= RESTART_GUARD_MS) {
+          lastRestartAt = now;
+          ESP.restart();
+      } else {
+          Serial.println("[GUARD] Bo qua reboot de tranh reboot-loop lien tuc.");
+          pendingReboot = false;
+      }
   }
 
   // Gọi checkAPCycle mỗi vòng lặp bất kể chế độ

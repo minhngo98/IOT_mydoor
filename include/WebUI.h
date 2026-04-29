@@ -37,11 +37,11 @@ const char setup_html[] PROGMEM = R"rawliteral(
             </div>
             <div class="form-group">
                 <label for="admin_pass">Mật Khẩu</label>
-                <input type="password" id="admin_pass" required placeholder="Ít nhất 6 ký tự" minlength="6" maxlength="64">
+                <input type="password" id="admin_pass" required placeholder="Ít nhất 8 ký tự" minlength="8" maxlength="64">
             </div>
             <div class="form-group">
                 <label for="admin_pass_confirm">Nhập Lại Mật Khẩu</label>
-                <input type="password" id="admin_pass_confirm" required placeholder="Nhập lại để xác nhận" minlength="6" maxlength="64">
+                <input type="password" id="admin_pass_confirm" required placeholder="Nhập lại để xác nhận" minlength="8" maxlength="64">
             </div>
             <button type="submit" class="btn" id="btnSubmit">Tạo Tài Khoản Admin</button>
         </form>
@@ -64,8 +64,8 @@ const char setup_html[] PROGMEM = R"rawliteral(
                 return;
             }
 
-            if (pass.length < 6) {
-                errorBox.textContent = "Mật khẩu phải có ít nhất 6 ký tự!";
+            if (pass.length < 8) {
+                errorBox.textContent = "Mật khẩu phải có ít nhất 8 ký tự!";
                 errorBox.style.display = 'block';
                 btn.textContent = 'Tạo Tài Khoản Admin';
                 btn.disabled = false;

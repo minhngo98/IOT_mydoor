@@ -28,7 +28,7 @@ void Task_Control(void *pvParameters) {
   for (;;) {
     esp_task_wdt_reset();
     controlLogic.loop();
-    vTaskDelay(pdMS_TO_TICKS(10)); // Nhường CPU để RTOS hoạt động mượt mà
+    vTaskDelay(pdMS_TO_TICKS(YIELD_CONTROL_MS)); // Nhịp điều khiển Core 1 tách biệt với luồng mạng
   }
 }
 

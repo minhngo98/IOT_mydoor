@@ -3,12 +3,20 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <AsyncTCP.h>
-#include <ESPAsyncWebServer.h>
 #include <Preferences.h>
-#include <ElegantOTA.h>
 #include "Config.h"
 #include "ControlLogic.h"
+
+#ifdef USE_LOCAL_WEB_STACK
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <ElegantOTA.h>
+#endif
+
+#ifndef USE_LOCAL_WEB_STACK
+class AsyncWebServer;
+class AsyncWebServerRequest;
+#endif
 
 #ifdef USE_BLYNK
 // Avoid re-defining Blynk instance in multiple files
@@ -18,6 +26,7 @@
 #include <esp_rmaker_core.h>
 #include <esp_rmaker_standard_params.h>
 #include <esp_rmaker_standard_devices.h>
+#include <esp_rmaker_standard_types.h>
 #include <nvs_flash.h>
 #include <esp_wifi.h>
 #include <esp_event.h>
@@ -94,7 +103,9 @@ public:
     String getRecentLogs() const;
 
 private:
+#ifdef USE_LOCAL_WEB_STACK
     AsyncWebServer server;
+#endif
     Preferences preferences;
     SemaphoreHandle_t stringMutex; // Mutex bảo vệ truy cập biến String giữa các luồng
 
@@ -126,9 +137,19 @@ private:
     volatile bool interruptConfigTriggered;
     volatile bool interruptResetTriggered;
 
+    // State machine cho nút cứng (non-blocking)
+    bool configPressActive;
+    unsigned long configPressStart;
+    unsigned long lastConfigDebounce;
+
+    bool resetPressActive;
+    unsigned long resetPressStart;
+    unsigned long lastResetDebounce;
+
     // Cờ reboot non-blocking
     bool pendingReboot;
     unsigned long rebootTime;
+    unsigned long lastRestartAt;
 
     // Helper functions cho AP cycle và Schedule
     bool isScheduleActiveNow(int currentMins);
@@ -141,7 +162,9 @@ private:
     void checkAPCycle();
     void handleWiFi();
     void handleResetButton();
+#ifdef USE_LOCAL_WEB_STACK
     bool checkAuth(AsyncWebServerRequest *request);
+#endif
     void handleBlynk();
     void resetBlynkSessionState();
     String safeGetString(const String& str);
@@ -160,6 +183,7 @@ private:
     esp_rmaker_device_t *doorDevice;
     esp_rmaker_device_t *powerBoxDevice;
     esp_rmaker_device_t *lightDevice;
+    String rainmakerDoorState;
 
     bool rainmakerInitialized;
     EventGroupHandle_t wifiEventGroup;
@@ -167,7 +191,7 @@ private:
     #define RM_MQTT_CONNECTED_BIT BIT1
     #define RM_FACTORY_RESET_BIT BIT2
 
-    static esp_err_t write_cb_wrapper(const rm_param_val_t val, void *priv_data);
+    static esp_err_t write_cb_wrapper(const esp_rmaker_device_t *device, const esp_rmaker_param_t *param, const esp_rmaker_param_val_t val, void *priv_data, esp_rmaker_write_ctx_t *ctx);
     static void rainmaker_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
     static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
 #endif

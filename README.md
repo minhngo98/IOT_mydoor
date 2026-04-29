@@ -44,7 +44,7 @@ MyDoor IoT là Firmware cấp công nghiệp (Professional Grade) điều khiể
 
 ## 🔌 Kiến trúc Hệ thống & Sơ đồ mạch (Architecture & Schematics)
 
-Sơ đồ nguyên lý toàn bộ hệ thống được thiết kế bằng QElectroTech. Xem chi tiết tại `docs/alll_diagram_electric.svg`.
+Sơ đồ nguyên lý toàn bộ hệ thống được thiết kế bằng QElectroTech. Xem chi tiết tại `docs/all_diagram_electric.svg`.
 
 <p align="center">
   <img src="docs/alll_diagram_electric.svg" width="100%" alt="Sơ đồ nguyên lý MyDoor IoT">
@@ -105,7 +105,7 @@ Sử dụng **VS Code** + **PlatformIO**. Trong `platformio.ini` đã chia sẵn
 *(Cả 2 môi trường đều được thiết lập tự động dùng file phân vùng bộ nhớ phù hợp).*
 
 ### 2. Thiết lập Lần đầu (First Boot) với bản Blynk
-1. Cấp nguồn, hệ thống phát WiFi mặc định: **`HomeSmartbyMinh`** (Mật khẩu: `04011998`).
+1. Cấp nguồn, hệ thống phát WiFi mặc định: **`SmartHomebyMinh`** (Mật khẩu: `04011998`).
 2. Truy cập `http://10.10.10.1`. Hệ thống bắt buộc tạo **Tài khoản Admin** (để bảo mật OTA và WebUI).
 3. Đăng nhập và cấu hình WiFi nhà bạn, Blynk Token, Lịch hẹn giờ.
 

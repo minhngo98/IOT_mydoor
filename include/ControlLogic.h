@@ -14,7 +14,9 @@ enum RemoteCommand {
     CMD_DOWN,
     CMD_STOP,
     CMD_LIGHT_ON,
-    CMD_LIGHT_OFF
+    CMD_LIGHT_OFF,
+    CMD_POWER_ON,
+    CMD_POWER_OFF
 };
 
 class ControlLogic {

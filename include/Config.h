@@ -73,7 +73,13 @@
 
 // FreeRTOS Yield Constants
 #define YIELD_WIFI_MS      20     // Thời gian nhường CPU cho stack Wi-Fi
+#define YIELD_CONTROL_MS   10     // Nhịp điều khiển cho Core 1
 #define YIELD_BUTTON_MS    100    // Thời gian chờ poll nút nhấn
+#define CONFIG_HOLD_MS     5000   // Nhấn giữ nút CONFIG để bật Rescue AP
+#define DEBOUNCE_MS        200    // Chống dội nút cứng
+#define RESET_REBOOT_MS    3000   // Nhấn giữ nút RESET để reboot
+#define RESET_FACTORY_MS   10000  // Nhấn giữ nút RESET để factory reset
+#define RESTART_GUARD_MS   30000  // Chặn reboot lặp liên tục trong thời gian ngắn
 
 // Cấu hình Task FreeRTOS (Priority: Control > Network)
 #define TASK_NETWORK_PRIORITY 1   // Ưu tiên thấp hơn cho Core 0 (Network)
@@ -85,6 +91,7 @@
 #define AP_CYCLE_ON_MS     600000 // 10 phút Bật AP (ms)
 #define AP_CYCLE_OFF_MS    300000 // 5 phút Tắt AP (ms)
 #define AP_LOCKOUT_MS      1800000// 30 phút khóa AP nếu nhập sai 5 lần (ms)
+#define RAINMAKER_REPROVISION_MS 300000 // 5 phút mất mạng thì bật lại provisioning
 
 // Mật khẩu mặc định xuất xưởng (First Boot)
 #define DEFAULT_RESCUE_AP_SSID "SmartHomebyMinh"
