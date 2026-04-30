@@ -15,6 +15,10 @@
   #define VPIN_POWER_BOX  V3  // Công tắc Nguồn Tổng (Switch)
   #define VPIN_TERMINAL   V4  // Terminal hiển thị Log sự kiện
   #define VPIN_LIGHT      V5  // Nút Bật/Tắt Đèn (Switch)
+  #define VPIN_LED_BLUE   V6  // Trạng thái LED Blue (GPIO13)
+  #define VPIN_LED_GREEN  V7  // Trạng thái LED Green (GPIO14)
+  #define VPIN_LED_RED    V8  // Trạng thái LED Red (GPIO4)
+  #define VPIN_LED_YELLOW V9  // Trạng thái LED Yellow (GPIO16)
 #endif
 
 // ==========================================
@@ -92,6 +96,12 @@
 #define AP_CYCLE_OFF_MS    300000 // 5 phút Tắt AP (ms)
 #define AP_LOCKOUT_MS      1800000// 30 phút khóa AP nếu nhập sai 5 lần (ms)
 #define RAINMAKER_REPROVISION_MS 300000 // 5 phút mất mạng thì bật lại provisioning
+
+// Persistent log runtime
+#define LOG_RETENTION_SEC          259200UL  // 3 ngày
+#define LOG_FLUSH_INTERVAL_MS      120000UL  // flush tối đa mỗi 120 giây
+#define LOG_FLUSH_BATCH_COUNT      20        // flush khi có >=20 log mới
+#define LOG_PERSISTENT_MAX_BYTES   49152UL   // giới hạn ~48KB
 
 // Mật khẩu mặc định xuất xưởng (First Boot)
 #define DEFAULT_RESCUE_AP_SSID "SmartHomebyMinh"

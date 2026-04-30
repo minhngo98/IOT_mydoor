@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <Preferences.h>
+#include <time.h>
 #include "Config.h"
 #include "ControlLogic.h"
 
@@ -97,10 +98,14 @@ public:
     void onBlynkConnected();
     void onBlynkDisconnected();
     bool canAcceptRemoteCommands() const;
+    void applyManualOverrideForPower(bool turnOn, const char* source);
+    void applyManualOverrideForLight(bool turnOn, const char* source);
+    void flushLogsToNvsIfNeeded(bool force);
 
     // Log Terminal
     void logEvent(const String& message);
     String getRecentLogs() const;
+    String getPublicLogs() const;
 
 private:
 #ifdef USE_LOCAL_WEB_STACK
@@ -113,6 +118,11 @@ private:
     String eventLogs[15];
     int logIndex;
     int lastBlynkSyncLogIndex;
+
+    // Persistent logs (NVS)
+    String persistentLogs;
+    uint16_t pendingPersistentLogCount;
+    unsigned long lastPersistentFlushMs;
 
     unsigned long lastWiFiCheck;
 
@@ -151,9 +161,38 @@ private:
     unsigned long rebootTime;
     unsigned long lastRestartAt;
 
+    bool resetFactoryPending;
+    bool faultLedBlinkState;
+    unsigned long faultLedLastToggle;
+    uint8_t faultLedFlashRemainingToggles;
+    unsigned long faultLedFlashDeadline;
+
+    bool ledWifiState;
+    bool ledReadyState;
+    bool ledFaultState;
+
+    bool apManualMode;
+    uint8_t pendingApAction;
+
+    bool powerOverrideActive;
+    bool lightOverrideActive;
+    bool scheduleStateInitialized;
+    bool lastPowerScheduleActive;
+    bool lastLightScheduleActive;
+
     // Helper functions cho AP cycle và Schedule
     bool isScheduleActiveNow(int currentMins);
     bool isLightScheduleActiveNow(int currentMins);
+    void updateManualOverridesAtScheduleEdge(bool powerScheduleActiveNow, bool lightScheduleActiveNow);
+
+    String detectLogTag(const String& message) const;
+    String formatLogWithTag(const String& message, const String& tag, time_t epoch) const;
+    String renderPersistentLogsForClient() const;
+    void loadPersistentLogs();
+    void rebuildRuntimeLogsFromPersistent();
+    void appendPersistentLogLine(time_t epoch, const String& tag, const String& message);
+    void pruneLogsOlderThan3Days(String& blob) const;
+    void replayLogsToBlynk();
 
     void loadConfig();
     void setupAP();
@@ -162,6 +201,15 @@ private:
     void checkAPCycle();
     void handleWiFi();
     void handleResetButton();
+    void enableRescueAp(const char* reason);
+    void disableRescueAp(const char* reason);
+    void toggleRescueAp(const char* reason);
+    void requestApEnable(bool manualMode, const char* reason);
+    void requestApDisable(const char* reason);
+    void processPendingApAction();
+    void startFaultLedFlash(uint8_t pulses);
+    void updateFaultLed(unsigned long now);
+    void updateStatusLeds();
 #ifdef USE_LOCAL_WEB_STACK
     bool checkAuth(AsyncWebServerRequest *request);
 #endif

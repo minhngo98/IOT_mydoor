@@ -3,6 +3,7 @@
 #include <esp_task_wdt.h>
 #include <esp_system.h>
 #include <cstring>
+#include <time.h>
 #include "Config.h"
 #include "NetworkManager.h"
 #ifdef USE_LOCAL_WEB_STACK
@@ -87,6 +88,28 @@ void sendHtml(AsyncWebServerRequest* request, const char* html) {
   request->send(200, "text/html", reinterpret_cast<const uint8_t*>(html), strlen(html));
 }
 #endif
+
+String normalizeLogField(const String& input) {
+  String out = input;
+  out.replace("\n", " ");
+  out.replace("\r", " ");
+  out.replace("|", "/");
+  return out;
+}
+
+bool parsePersistentRecord(const String& line, time_t& epochOut, String& tagOut, String& messageOut) {
+  int p1 = line.indexOf('|');
+  if (p1 < 0) return false;
+  int p2 = line.indexOf('|', p1 + 1);
+  if (p2 < 0) return false;
+  int p3 = line.indexOf('|', p2 + 1);
+  if (p3 < 0) return false;
+
+  epochOut = static_cast<time_t>(line.substring(0, p1).toInt());
+  tagOut = line.substring(p2 + 1, p3);
+  messageOut = line.substring(p3 + 1);
+  return true;
+}
 }
 
 // ISR Handler cho nút BOOT (Phải đặt ở ngoài class)
@@ -109,7 +132,11 @@ NetworkManager::NetworkManager()
   interruptResetTriggered(false), configPressActive(false), configPressStart(0), lastConfigDebounce(0),
   resetPressActive(false), resetPressStart(0), lastResetDebounce(0), claimRequired(false), webServerInitialized(false), isFirstBoot(false),
   otaInitialized(false), lastBlynkConnectAttempt(0), blynkReconnectBackoffMs(BLYNK_RECONNECT_BASE_MS),
-  blynkRemoteGuardUntil(0), blynkWasConnected(false), blynkInvalidToken(false), logIndex(0), lastBlynkSyncLogIndex(0), isOtaRunning(false), pendingReboot(false), rebootTime(0), lastRestartAt(0) {
+  blynkRemoteGuardUntil(0), blynkWasConnected(false), blynkInvalidToken(false), logIndex(0), lastBlynkSyncLogIndex(0),
+  persistentLogs(""), pendingPersistentLogCount(0), lastPersistentFlushMs(0), isOtaRunning(false), pendingReboot(false), rebootTime(0), lastRestartAt(0),
+  resetFactoryPending(false), faultLedBlinkState(false), faultLedLastToggle(0), faultLedFlashRemainingToggles(0), faultLedFlashDeadline(0),
+  ledWifiState(false), ledReadyState(false), ledFaultState(false), apManualMode(false), pendingApAction(0),
+  powerOverrideActive(false), lightOverrideActive(false), scheduleStateInitialized(false), lastPowerScheduleActive(false), lastLightScheduleActive(false) {
     stringMutex = NULL;
 #ifdef USE_RAINMAKER
     rainmakerNode = NULL;
@@ -142,31 +169,177 @@ void NetworkManager::safeSetString(String& target, const String& value) {
     }
 }
 
-void NetworkManager::logEvent(const String& message) {
-    // 1. In ra Serial Console
-    Serial.println(message);
+String NetworkManager::detectLogTag(const String& message) const {
+    String upper = message;
+    upper.toUpperCase();
 
-    // 2. Thêm thời gian nếu có thể (lấy từ timeinfo)
-    struct tm timeinfo;
-    String timeStr = "";
-    if (getLocalTime(&timeinfo, 10)) {
-        char buf[20];
-        snprintf(buf, sizeof(buf), "[%02d:%02d:%02d] ", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
-        timeStr = String(buf);
-    } else {
-        timeStr = "[--:--:--] ";
+    if (upper.indexOf("[AUTO]") >= 0 || upper.indexOf("AUTO") >= 0 || upper.indexOf("DEN GIO") >= 0) {
+        return "AUTO";
+    }
+    if (upper.indexOf(" BAT") >= 0 || upper.startsWith("BAT") || upper.indexOf(": ON") >= 0 || upper.indexOf(" ON ") >= 0 || upper.endsWith(" ON")) {
+        return "ON";
+    }
+    if (upper.indexOf(" TAT") >= 0 || upper.startsWith("TAT") || upper.indexOf(": OFF") >= 0 || upper.indexOf(" OFF ") >= 0 || upper.endsWith(" OFF")) {
+        return "OFF";
+    }
+    return "INFO";
+}
+
+String NetworkManager::formatLogWithTag(const String& message, const String& tag, time_t epoch) const {
+    String timeStr = "[--:--:--]";
+    if (epoch > 0) {
+        struct tm tmInfo;
+        if (localtime_r(&epoch, &tmInfo) != nullptr) {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "[%02d:%02d:%02d]", tmInfo.tm_hour, tmInfo.tm_min, tmInfo.tm_sec);
+            timeStr = String(buf);
+        }
+    }
+    return "[" + tag + "] " + timeStr + " " + message;
+}
+
+void NetworkManager::pruneLogsOlderThan3Days(String& blob) const {
+    if (blob.length() == 0) return;
+
+    time_t nowEpoch = time(nullptr);
+    if (nowEpoch < 100000) {
+        return;
     }
 
-    String logLine = timeStr + message;
+    const time_t cutoff = nowEpoch - static_cast<time_t>(LOG_RETENTION_SEC);
+    String kept;
+    kept.reserve(blob.length());
 
-    // 3. Đưa vào mảng log (Ring Buffer đơn giản 15 dòng cho WebUI)
-    if (xSemaphoreTake(stringMutex, pdMS_TO_TICKS(100))) {
-        eventLogs[logIndex] = logLine;
+    int start = 0;
+    while (start < static_cast<int>(blob.length())) {
+        int end = blob.indexOf('\n', start);
+        if (end < 0) end = blob.length();
+
+        String line = blob.substring(start, end);
+        time_t epoch;
+        String tag;
+        String msg;
+        bool parsed = parsePersistentRecord(line, epoch, tag, msg);
+        if (!parsed || epoch <= 0 || epoch >= cutoff) {
+            kept += line;
+            kept += "\n";
+        }
+
+        start = end + 1;
+    }
+
+    blob = kept;
+}
+
+void NetworkManager::rebuildRuntimeLogsFromPersistent() {
+    for (int i = 0; i < 15; ++i) {
+        eventLogs[i] = "";
+    }
+    logIndex = 0;
+    lastBlynkSyncLogIndex = 0;
+
+    int start = 0;
+    while (start < static_cast<int>(persistentLogs.length())) {
+        int end = persistentLogs.indexOf('\n', start);
+        if (end < 0) end = persistentLogs.length();
+        String line = persistentLogs.substring(start, end);
+
+        time_t epoch;
+        String tag;
+        String msg;
+        if (parsePersistentRecord(line, epoch, tag, msg)) {
+            eventLogs[logIndex] = formatLogWithTag(msg, tag, epoch);
+            logIndex = (logIndex + 1) % 15;
+            if (logIndex == lastBlynkSyncLogIndex) {
+                lastBlynkSyncLogIndex = (lastBlynkSyncLogIndex + 1) % 15;
+            }
+        }
+
+        start = end + 1;
+    }
+    lastBlynkSyncLogIndex = logIndex;
+}
+
+void NetworkManager::loadPersistentLogs() {
+    Preferences p;
+    p.begin("mydoor_logs", true);
+    persistentLogs = p.getString("lines", "");
+    p.end();
+
+    pruneLogsOlderThan3Days(persistentLogs);
+
+    while (persistentLogs.length() > static_cast<int>(LOG_PERSISTENT_MAX_BYTES)) {
+        int firstNewLine = persistentLogs.indexOf('\n');
+        if (firstNewLine < 0) {
+            persistentLogs = "";
+            break;
+        }
+        persistentLogs = persistentLogs.substring(firstNewLine + 1);
+    }
+
+    rebuildRuntimeLogsFromPersistent();
+}
+
+void NetworkManager::appendPersistentLogLine(time_t epoch, const String& tag, const String& message) {
+    String normalizedTag = normalizeLogField(tag);
+    String normalizedMsg = normalizeLogField(message);
+    String line = String(static_cast<unsigned long>(epoch > 0 ? epoch : 0)) + "|INFO|" + normalizedTag + "|" + normalizedMsg;
+
+    persistentLogs += line;
+    persistentLogs += "\n";
+    pendingPersistentLogCount++;
+
+    pruneLogsOlderThan3Days(persistentLogs);
+
+    while (persistentLogs.length() > static_cast<int>(LOG_PERSISTENT_MAX_BYTES)) {
+        int firstNewLine = persistentLogs.indexOf('\n');
+        if (firstNewLine < 0) {
+            persistentLogs = "";
+            break;
+        }
+        persistentLogs = persistentLogs.substring(firstNewLine + 1);
+    }
+}
+
+void NetworkManager::flushLogsToNvsIfNeeded(bool force) {
+    unsigned long now = millis();
+    bool shouldFlush = force || pendingPersistentLogCount >= LOG_FLUSH_BATCH_COUNT || (pendingPersistentLogCount > 0 && (now - lastPersistentFlushMs >= LOG_FLUSH_INTERVAL_MS));
+    if (!shouldFlush) return;
+
+    String snapshot;
+    if (!xSemaphoreTake(stringMutex, pdMS_TO_TICKS(150))) {
+        return;
+    }
+    snapshot = persistentLogs;
+    pendingPersistentLogCount = 0;
+    lastPersistentFlushMs = now;
+    xSemaphoreGive(stringMutex);
+
+    Preferences p;
+    p.begin("mydoor_logs", false);
+    p.putString("lines", snapshot);
+    p.end();
+}
+
+void NetworkManager::logEvent(const String& message) {
+    Serial.println(message);
+
+    time_t epoch = time(nullptr);
+    if (epoch < 100000) {
+        epoch = 0;
+    }
+
+    String tag = detectLogTag(message);
+    String display = formatLogWithTag(message, tag, epoch);
+
+    if (xSemaphoreTake(stringMutex, pdMS_TO_TICKS(150))) {
+        eventLogs[logIndex] = display;
         logIndex = (logIndex + 1) % 15;
-        // Nếu vòng ring buffer đè lên dữ liệu chưa sync, phải tăng lastSync để đuổi theo
         if (logIndex == lastBlynkSyncLogIndex) {
             lastBlynkSyncLogIndex = (lastBlynkSyncLogIndex + 1) % 15;
         }
+
+        appendPersistentLogLine(epoch, tag, message);
         xSemaphoreGive(stringMutex);
     } else {
         Serial.println("[MUTEX] Timeout logging event");
@@ -174,48 +347,90 @@ void NetworkManager::logEvent(const String& message) {
 }
 
 void NetworkManager::syncLogsToCloud() {
-    if (lastBlynkSyncLogIndex == logIndex) return; // Không có log mới
+    if (lastBlynkSyncLogIndex == logIndex) return;
 
     if (xSemaphoreTake(stringMutex, pdMS_TO_TICKS(100))) {
         while (lastBlynkSyncLogIndex != logIndex) {
             String logLine = eventLogs[lastBlynkSyncLogIndex];
-
-            // Gửi lên Cloud
 #ifdef USE_BLYNK
             if (Blynk.connected()) {
                 Blynk.virtualWrite(VPIN_TERMINAL, logLine + "\n");
             }
 #endif
-#ifdef USE_RAINMAKER
-            // Future: push logs to RainMaker
-#endif
-
             lastBlynkSyncLogIndex = (lastBlynkSyncLogIndex + 1) % 15;
         }
         xSemaphoreGive(stringMutex);
     }
 }
 
-String NetworkManager::getRecentLogs() const {
-    String output = "";
-    output.reserve(1024); // Giảm thiểu phân mảnh RAM do cộng chuỗi nhiều
-    if (xSemaphoreTake(stringMutex, pdMS_TO_TICKS(100))) {
-        int count = 0;
-        int idx = logIndex;
-        // Đi lùi từ log mới nhất về log cũ nhất
-        while (count < 15) {
-            idx--;
-            if (idx < 0) idx = 14;
-            if (eventLogs[idx].length() > 0) {
-                output += eventLogs[idx] + "\n";
-            }
-            count++;
-        }
-        xSemaphoreGive(stringMutex);
-    } else {
-        output = "[System] Dang dong bo log, vui long thu lai...\n";
+String NetworkManager::renderPersistentLogsForClient() const {
+    String snapshot;
+    if (!xSemaphoreTake(stringMutex, pdMS_TO_TICKS(100))) {
+        return "[System] Dang dong bo log, vui long thu lai...\n";
     }
+    snapshot = persistentLogs;
+    xSemaphoreGive(stringMutex);
+
+    if (snapshot.length() == 0) return "";
+
+    String output;
+    output.reserve(snapshot.length() + 128);
+
+    int start = 0;
+    while (start < static_cast<int>(snapshot.length())) {
+        int end = snapshot.indexOf('\n', start);
+        if (end < 0) end = snapshot.length();
+
+        String line = snapshot.substring(start, end);
+        time_t epoch;
+        String tag;
+        String msg;
+        if (parsePersistentRecord(line, epoch, tag, msg)) {
+            output += formatLogWithTag(msg, tag, epoch);
+            output += "\n";
+        }
+        start = end + 1;
+    }
+
     return output;
+}
+
+String NetworkManager::getRecentLogs() const {
+    return renderPersistentLogsForClient();
+}
+
+String NetworkManager::getPublicLogs() const {
+    return renderPersistentLogsForClient();
+}
+
+void NetworkManager::replayLogsToBlynk() {
+#ifdef USE_BLYNK
+    if (!Blynk.connected()) return;
+
+    String snapshot;
+    if (!xSemaphoreTake(stringMutex, pdMS_TO_TICKS(150))) {
+        return;
+    }
+    snapshot = persistentLogs;
+    lastBlynkSyncLogIndex = logIndex;
+    xSemaphoreGive(stringMutex);
+
+    int start = 0;
+    while (start < static_cast<int>(snapshot.length())) {
+        int end = snapshot.indexOf('\n', start);
+        if (end < 0) end = snapshot.length();
+        String line = snapshot.substring(start, end);
+
+        time_t epoch;
+        String tag;
+        String msg;
+        if (parsePersistentRecord(line, epoch, tag, msg)) {
+            Blynk.virtualWrite(VPIN_TERMINAL, formatLogWithTag(msg, tag, epoch) + "\n");
+        }
+
+        start = end + 1;
+    }
+#endif
 }
 
 void NetworkManager::handleInterruptConfig() {
@@ -230,6 +445,9 @@ void NetworkManager::begin() {
   if (stringMutex == NULL) {
       stringMutex = xSemaphoreCreateMutex();
   }
+
+  lastPersistentFlushMs = millis();
+  loadPersistentLogs();
 
   pinMode(PIN_BTN_CONFIG, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(PIN_BTN_CONFIG), isr_config_button, FALLING);
@@ -295,18 +513,8 @@ void NetworkManager::loadConfig() {
   blynkAuth = preferences.getString("blynkAuth", "");
 
   rescueApSsid = preferences.getString("rescue_ssid", "");
-  if (rescueApSsid == "") {
-    rescueApSsid = DEFAULT_RESCUE_AP_SSID;
-    preferences.putString("rescue_ssid", rescueApSsid);
-  }
-
   rescueApPass = preferences.getString("rescue_pass", "");
-  bool generatedRescuePass = false;
-  if (rescueApPass.length() < 8) {
-    rescueApPass = DEFAULT_RESCUE_AP_PASS;
-    preferences.putString("rescue_pass", rescueApPass);
-    generatedRescuePass = true;
-  }
+  bool rescueCustomized = preferences.getBool("rescue_customized", false);
 
   timezone = preferences.getChar("timezone", 7); // Mặc định UTC+7
   onHour = preferences.getUChar("onHour", 6); // Mặc định bật 6h sáng
@@ -345,6 +553,32 @@ void NetworkManager::loadConfig() {
   claimRequired = (adminUser == "" || adminPass == "");
   isFirstBoot = claimRequired;
 
+  bool rescueSsidEmpty = (rescueApSsid == "");
+  bool rescuePassWeak = rescueApPass.length() < 8;
+  bool rescueSsidLegacy = rescueApSsid.equalsIgnoreCase("esp32");
+  bool shouldForceDefaultRescue = !rescueCustomized && (rescueSsidEmpty || rescuePassWeak || rescueSsidLegacy || claimRequired);
+
+  if (shouldForceDefaultRescue) {
+    rescueApSsid = DEFAULT_RESCUE_AP_SSID;
+    rescueApPass = DEFAULT_RESCUE_AP_PASS;
+    preferences.putString("rescue_ssid", rescueApSsid);
+    preferences.putString("rescue_pass", rescueApPass);
+    preferences.putBool("rescue_customized", false);
+  } else {
+    if (rescueSsidEmpty) {
+      rescueApSsid = DEFAULT_RESCUE_AP_SSID;
+      preferences.putString("rescue_ssid", rescueApSsid);
+    }
+    if (rescuePassWeak) {
+      rescueApPass = DEFAULT_RESCUE_AP_PASS;
+      preferences.putString("rescue_pass", rescueApPass);
+    }
+  }
+
+  if (rescueCustomized && rescueSsidEmpty) {
+    preferences.putBool("rescue_customized", false);
+  }
+
   preferences.end();
 
   if (claimRequired) {
@@ -374,7 +608,7 @@ void NetworkManager::setupAP() {
   WiFi.softAPConfig(local_ip, gateway, subnet);
 
   WiFi.softAP(rescueApSsid.c_str(), rescueApPass.c_str(), 1, 0);
-  Serial.printf("[AP] Rescue AP dang hoat dong. SSID: %s, IP: 10.10.10.1\n", rescueApSsid.c_str());
+  Serial.printf("[AP] Rescue AP dang hoat dong. SSID: %s, PASS: %s, IP: 10.10.10.1\n", rescueApSsid.c_str(), rescueApPass.c_str());
 
   if (ssid != "") {
       WiFi.begin(ssid.c_str(), password.c_str());
@@ -382,6 +616,177 @@ void NetworkManager::setupAP() {
 
   apStartTime = millis();
   setupWebServer();
+}
+
+void NetworkManager::enableRescueAp(const char* reason) {
+  isLockedOut = false;
+  failedAuthCount = 0;
+  if (reason != nullptr && reason[0] != '\0') {
+      Serial.printf("[AP] Bat Rescue AP: %s\n", reason);
+  }
+  if (!isApMode) {
+      setupAP();
+      return;
+  }
+  apStartTime = millis();
+}
+
+void NetworkManager::disableRescueAp(const char* reason) {
+  if (!isApMode) {
+      return;
+  }
+
+  WiFi.softAPdisconnect(true);
+  isApMode = false;
+  apManualMode = false;
+  if (reason != nullptr && reason[0] != '\0') {
+      Serial.printf("[AP] Tat Rescue AP: %s\n", reason);
+  }
+
+  if (ssid != "") {
+      WiFi.mode(WIFI_STA);
+      WiFi.begin(ssid.c_str(), password.c_str());
+  } else {
+      WiFi.mode(WIFI_AP_STA);
+  }
+
+#ifdef USE_BLYNK
+  resetBlynkSessionState();
+#endif
+}
+
+void NetworkManager::toggleRescueAp(const char* reason) {
+  if (isApMode) {
+      disableRescueAp(reason);
+  } else {
+      enableRescueAp(reason);
+  }
+}
+
+void NetworkManager::requestApEnable(bool manualMode, const char* reason) {
+  apManualMode = manualMode;
+  if (reason != nullptr && reason[0] != '\0') {
+      Serial.printf("[AP] Queue bat AP: %s\n", reason);
+  }
+  pendingApAction = 1;
+}
+
+void NetworkManager::requestApDisable(const char* reason) {
+  if (reason != nullptr && reason[0] != '\0') {
+      Serial.printf("[AP] Queue tat AP: %s\n", reason);
+  }
+  pendingApAction = 2;
+}
+
+void NetworkManager::processPendingApAction() {
+  if (pendingApAction == 1) {
+      enableRescueAp("Queued AP ON");
+      pendingApAction = 0;
+      return;
+  }
+
+  if (pendingApAction == 2) {
+      disableRescueAp("Queued AP OFF");
+      apManualMode = false;
+      pendingApAction = 0;
+  }
+}
+
+void NetworkManager::startFaultLedFlash(uint8_t pulses) {
+  if (pulses == 0) return;
+  faultLedFlashRemainingToggles = static_cast<uint8_t>(pulses * 2);
+  faultLedLastToggle = millis();
+  faultLedFlashDeadline = faultLedLastToggle + 120;
+  faultLedBlinkState = true;
+  digitalWrite(PIN_LED_WARN, LED_ON);
+}
+
+void NetworkManager::updateFaultLed(unsigned long now) {
+  if (faultLedFlashRemainingToggles > 0) {
+      if (now >= faultLedFlashDeadline) {
+          faultLedBlinkState = !faultLedBlinkState;
+          digitalWrite(PIN_LED_WARN, faultLedBlinkState ? LED_ON : LED_OFF);
+          faultLedFlashRemainingToggles--;
+          faultLedFlashDeadline = now + 120;
+      }
+      return;
+  }
+
+  if (isApMode) {
+      if (now - faultLedLastToggle >= 300) {
+          faultLedLastToggle = now;
+          faultLedBlinkState = !faultLedBlinkState;
+          digitalWrite(PIN_LED_WARN, faultLedBlinkState ? LED_ON : LED_OFF);
+      }
+  } else {
+      faultLedBlinkState = false;
+      digitalWrite(PIN_LED_WARN, LED_OFF);
+  }
+}
+
+void NetworkManager::updateStatusLeds() {
+  ledWifiState = isConnected && !isApMode;
+  ledReadyState = !isFirstBoot && !pendingReboot;
+  ledFaultState = isLockedOut;
+
+  digitalWrite(PIN_LED_WIFI, ledWifiState ? LED_ON : LED_OFF);
+  digitalWrite(PIN_LED_READY, ledReadyState ? LED_ON : LED_OFF);
+  digitalWrite(PIN_LED_FAULT, ledFaultState ? LED_ON : LED_OFF);
+}
+
+void NetworkManager::handleResetButton() {
+  unsigned long now = millis();
+
+  if (interruptResetTriggered) {
+      interruptResetTriggered = false;
+      if (now - lastResetDebounce >= DEBOUNCE_MS) {
+          lastResetDebounce = now;
+          resetPressActive = true;
+          resetPressStart = now;
+      }
+  }
+
+  if (!resetPressActive) {
+      return;
+  }
+
+  if (digitalRead(PIN_BTN_RESET) == LOW) {
+      return;
+  }
+
+  unsigned long holdMs = now - resetPressStart;
+  resetPressActive = false;
+
+  if (holdMs >= RESET_FACTORY_MS) {
+      Serial.println("\n[FACTORY RESET] Dang xoa toan bo cau hinh...");
+      flushLogsToNvsIfNeeded(true);
+      Preferences p;
+      p.begin("mydoor", false); p.clear(); p.end();
+      p.begin("mydoor_state", false); p.clear(); p.end();
+      Serial.println("[FACTORY RESET] Hoan tat. Dang khoi dong lai he thong...");
+      resetFactoryPending = true;
+      startFaultLedFlash(3);
+      pendingReboot = true;
+      rebootTime = now;
+      return;
+  }
+
+  if (holdMs >= RESET_REBOOT_MS) {
+      Serial.println("\n[REBOOT] Lenh Reboot tu nut bam cung.");
+      flushLogsToNvsIfNeeded(true);
+      resetFactoryPending = false;
+      startFaultLedFlash(1);
+      pendingReboot = true;
+      rebootTime = now;
+      return;
+  }
+
+  if (isApMode) {
+      requestApDisable("GPIO2 short press");
+      apManualMode = false;
+  } else {
+      requestApEnable(true, "GPIO2 short press");
+  }
 }
 
 void NetworkManager::setupSTA() {
@@ -504,10 +909,12 @@ esp_err_t NetworkManager::write_cb_wrapper(const esp_rmaker_device_t *device, co
         bool turnOn = val.val.b;
         controlLogic.executeRemoteCommand(turnOn ? CMD_POWER_ON : CMD_POWER_OFF);
         netManager.logEvent("Power Box: " + String(turnOn ? "ON" : "OFF") + " (RainMaker)");
+        netManager.applyManualOverrideForPower(turnOn, "RainMaker");
     } else if (device_id == 0x02) {
         bool turnOn = val.val.b;
         controlLogic.executeRemoteCommand(turnOn ? CMD_LIGHT_ON : CMD_LIGHT_OFF);
         netManager.logEvent("Light: " + String(turnOn ? "ON" : "OFF") + " (RainMaker)");
+        netManager.applyManualOverrideForLight(turnOn, "RainMaker");
     } else if (device_id == 0x00) {
         const char* param_name = esp_rmaker_param_get_name(param);
         if (strcmp(param_name, "up") == 0 && val.val.b) {
@@ -866,6 +1273,7 @@ void NetworkManager::setupWebServer() {
     if (newPass.length() > 0) {
       p.putString("rescue_pass", newPass);
     }
+    p.putBool("rescue_customized", true);
     p.end();
 
     netManager.safeSetString(netManager.rescueApSsid, newSsid);
@@ -890,8 +1298,29 @@ void NetworkManager::setupWebServer() {
     if (!netManager.checkAuth(request)) return;
 
     request->send(200, "text/plain", "Rebooting");
+    netManager.flushLogsToNvsIfNeeded(true);
     netManager.pendingReboot = true;
     netManager.rebootTime = millis();
+  });
+
+  server.on("/ap_mode", ASYNC_POST, [](AsyncWebServerRequest *request){
+    if (!netManager.checkAuth(request)) return;
+
+    if (!request->hasParam("state", true)) {
+      return request->send(400, "text/plain", "Missing state");
+    }
+
+    String state = request->getParam("state", true)->value();
+    bool turnOn = (state == "1" || state == "on" || state == "true");
+    if (turnOn) {
+      netManager.requestApEnable(true, "WebUI request");
+      netManager.logEvent("Rescue AP: BAT (WebUI)");
+    } else {
+      netManager.requestApDisable("WebUI request");
+      netManager.logEvent("Rescue AP: TAT (WebUI)");
+    }
+
+    request->send(200, "text/plain", "OK");
   });
 
   // API API Control Cửa (Up/Stop/Down)
@@ -928,6 +1357,7 @@ void NetworkManager::setupWebServer() {
         bool turnOn = (state == "1" || state == "true");
         controlLogic.executeRemoteCommand(turnOn ? CMD_POWER_ON : CMD_POWER_OFF);
         netManager.logEvent("Nguon Box: " + String(turnOn ? "BAT" : "TAT") + " (WebUI)");
+        netManager.applyManualOverrideForPower(turnOn, "WebUI");
         netManager.pushCloudState();
 
         request->send(200, "text/plain", "OK");
@@ -945,6 +1375,7 @@ void NetworkManager::setupWebServer() {
         bool turnOn = (state == "1" || state == "true");
         controlLogic.executeRemoteCommand(turnOn ? CMD_LIGHT_ON : CMD_LIGHT_OFF);
         netManager.logEvent("Den: " + String(turnOn ? "BAT" : "TAT") + " (WebUI)");
+        netManager.applyManualOverrideForLight(turnOn, "WebUI");
         netManager.pushCloudState();
 
         request->send(200, "text/plain", "OK");
@@ -957,6 +1388,11 @@ void NetworkManager::setupWebServer() {
   server.on("/logs", ASYNC_GET, [](AsyncWebServerRequest *request){
     if (!netManager.checkAuth(request)) return;
     request->send(200, "text/plain", netManager.getRecentLogs());
+  });
+
+  // API Public read-only logs (không yêu cầu auth)
+  server.on("/public_logs", ASYNC_GET, [](AsyncWebServerRequest *request){
+    request->send(200, "text/plain", netManager.getPublicLogs());
   });
 
   // Khởi động ElegantOTA (/update) -> Nạp file .bin từ trình duyệt
@@ -981,22 +1417,22 @@ void NetworkManager::setupWebServer() {}
 #endif
 
 void NetworkManager::checkAPCycle() {
-  bool shouldCycleAp = wifiLostFlag || ssid == "";
+  bool provisioningCritical = claimRequired || isFirstBoot || ssid == "";
+  bool shouldCycleAp = !provisioningCritical && wifiLostFlag;
 
   if (isApMode) {
+      if (!shouldCycleAp || apManualMode) {
+          return;
+      }
       if (millis() - apStartTime >= AP_CYCLE_ON_MS) {
-          // Hết 10 phút, Tắt AP, nghỉ 5 phút
           Serial.println("[AP CYCLE] AP da bat 10 phut, tat AP trong 5 phut...");
-          isApMode = false;
-          WiFi.softAPdisconnect(true);
-          WiFi.mode(WIFI_STA); // Trả về STA để dò mạng
+          requestApDisable("AP cycle OFF window");
           apOfflineTime = millis();
       }
   } else if (shouldCycleAp) {
       if (millis() - apOfflineTime >= AP_CYCLE_OFF_MS) {
-          // Hết 5 phút nghỉ, bật lại AP 10 phút
           Serial.println("[AP CYCLE] AP da nghi 5 phut, bat lai AP 10 phut...");
-          setupAP();
+          requestApEnable(false, "AP cycle ON window");
       }
   }
 }
@@ -1052,6 +1488,67 @@ bool NetworkManager::isLightScheduleActiveNow(int currentMins) {
   }
 }
 
+void NetworkManager::updateManualOverridesAtScheduleEdge(bool powerScheduleActiveNow, bool lightScheduleActiveNow) {
+  if (!scheduleStateInitialized) {
+      lastPowerScheduleActive = powerScheduleActiveNow;
+      lastLightScheduleActive = lightScheduleActiveNow;
+      scheduleStateInitialized = true;
+      return;
+  }
+
+  if (powerScheduleActiveNow != lastPowerScheduleActive) {
+      if (powerOverrideActive) {
+          powerOverrideActive = false;
+          logEvent("[AUTO] Power override cleared at schedule edge");
+      }
+      lastPowerScheduleActive = powerScheduleActiveNow;
+  }
+
+  if (lightScheduleActiveNow != lastLightScheduleActive) {
+      if (lightOverrideActive) {
+          lightOverrideActive = false;
+          logEvent("[AUTO] Light override cleared at schedule edge");
+      }
+      lastLightScheduleActive = lightScheduleActiveNow;
+  }
+}
+
+void NetworkManager::applyManualOverrideForPower(bool turnOn, const char* source) {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo, 100)) return;
+
+  int currentMins = timeinfo.tm_hour * 60 + timeinfo.tm_min;
+  bool scheduleActiveNow = isScheduleActiveNow(currentMins);
+
+  if (turnOn != scheduleActiveNow) {
+      if (!powerOverrideActive) {
+          powerOverrideActive = true;
+          logEvent(String("[AUTO] Power override active until next schedule edge (") + source + ")");
+      }
+  } else if (powerOverrideActive) {
+      powerOverrideActive = false;
+      logEvent("[AUTO] Power override cleared (manual aligned with schedule)");
+  }
+}
+
+void NetworkManager::applyManualOverrideForLight(bool turnOn, const char* source) {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo, 100)) return;
+
+  int currentMins = timeinfo.tm_hour * 60 + timeinfo.tm_min;
+  bool scheduleActiveNow = isLightScheduleActiveNow(currentMins);
+
+  if (turnOn != scheduleActiveNow) {
+      if (!lightOverrideActive) {
+          lightOverrideActive = true;
+          logEvent(String("[AUTO] Light override active until next schedule edge (") + source + ")");
+      }
+  } else if (lightOverrideActive) {
+      lightOverrideActive = false;
+      logEvent("[AUTO] Light override cleared (manual aligned with schedule)");
+  }
+}
+
 void NetworkManager::checkNTP() {
   if (!isConnected || isApMode) return;
 
@@ -1068,30 +1565,38 @@ void NetworkManager::checkNTP() {
   int currentMins = timeinfo.tm_hour * 60 + timeinfo.tm_min;
 
   bool scheduleActiveNow = isScheduleActiveNow(currentMins);
-
-  if (scheduleActiveNow && !controlLogic.isPowerBoxOn()) {
-      Serial.printf("[AUTO] %02d:%02d - Den gio mo Box Cua\n", timeinfo.tm_hour, timeinfo.tm_min);
-      controlLogic.executeRemoteCommand(CMD_POWER_ON);
-      pushCloudState();
-  }
-  else if (!scheduleActiveNow && controlLogic.isPowerBoxOn()) {
-      Serial.printf("[AUTO] %02d:%02d - Den gio dong Box Cua\n", timeinfo.tm_hour, timeinfo.tm_min);
-      controlLogic.executeRemoteCommand(CMD_POWER_OFF);
-      pushCloudState();
-  }
-
-  // Logic tự động bật/tắt Đèn (Relay 5)
   bool lightScheduleActiveNow = isLightScheduleActiveNow(currentMins);
 
-  if (lightScheduleActiveNow && !controlLogic.isLightOn()) {
-      Serial.printf("[AUTO] %02d:%02d - Den gio bat Den\n", timeinfo.tm_hour, timeinfo.tm_min);
-      controlLogic.executeRemoteCommand(CMD_LIGHT_ON);
-      pushCloudState();
+  updateManualOverridesAtScheduleEdge(scheduleActiveNow, lightScheduleActiveNow);
+
+  if (!powerOverrideActive) {
+      if (scheduleActiveNow && !controlLogic.isPowerBoxOn()) {
+          Serial.printf("[AUTO] %02d:%02d - Den gio mo Box Cua\n", timeinfo.tm_hour, timeinfo.tm_min);
+          logEvent("[AUTO] Nguon Box: BAT (Schedule)");
+          controlLogic.executeRemoteCommand(CMD_POWER_ON);
+          pushCloudState();
+      }
+      else if (!scheduleActiveNow && controlLogic.isPowerBoxOn()) {
+          Serial.printf("[AUTO] %02d:%02d - Den gio dong Box Cua\n", timeinfo.tm_hour, timeinfo.tm_min);
+          logEvent("[AUTO] Nguon Box: TAT (Schedule)");
+          controlLogic.executeRemoteCommand(CMD_POWER_OFF);
+          pushCloudState();
+      }
   }
-  else if (!lightScheduleActiveNow && controlLogic.isLightOn()) {
-      Serial.printf("[AUTO] %02d:%02d - Den gio tat Den\n", timeinfo.tm_hour, timeinfo.tm_min);
-      controlLogic.executeRemoteCommand(CMD_LIGHT_OFF);
-      pushCloudState();
+
+  if (!lightOverrideActive) {
+      if (lightScheduleActiveNow && !controlLogic.isLightOn()) {
+          Serial.printf("[AUTO] %02d:%02d - Den gio bat Den\n", timeinfo.tm_hour, timeinfo.tm_min);
+          logEvent("[AUTO] Den: BAT (Schedule)");
+          controlLogic.executeRemoteCommand(CMD_LIGHT_ON);
+          pushCloudState();
+      }
+      else if (!lightScheduleActiveNow && controlLogic.isLightOn()) {
+          Serial.printf("[AUTO] %02d:%02d - Den gio tat Den\n", timeinfo.tm_hour, timeinfo.tm_min);
+          logEvent("[AUTO] Den: TAT (Schedule)");
+          controlLogic.executeRemoteCommand(CMD_LIGHT_OFF);
+          pushCloudState();
+      }
   }
 }
 
@@ -1109,6 +1614,10 @@ void NetworkManager::pushBlynkState() {
   if (Blynk.connected()) {
       Blynk.virtualWrite(VPIN_POWER_BOX, controlLogic.isPowerBoxOn() ? 1 : 0);
       Blynk.virtualWrite(VPIN_LIGHT, controlLogic.isLightOn() ? 1 : 0);
+      Blynk.virtualWrite(VPIN_LED_BLUE, ledWifiState ? 1 : 0);
+      Blynk.virtualWrite(VPIN_LED_GREEN, ledReadyState ? 1 : 0);
+      Blynk.virtualWrite(VPIN_LED_RED, ledFaultState ? 1 : 0);
+      Blynk.virtualWrite(VPIN_LED_YELLOW, (isApMode || faultLedBlinkState) ? 1 : 0);
   }
 #endif
 }
@@ -1156,33 +1665,30 @@ void NetworkManager::handleRemoteDoorCommand(RemoteCommand cmd) {
   else if (cmd == CMD_STOP) rainmakerDoorState = "STOPPED";
 #endif
   controlLogic.executeRemoteCommand(cmd);
-  pushCloudState();
 }
 
 void NetworkManager::handleRemotePowerCommand(bool turnOn) {
 #ifdef USE_BLYNK
   if (!canAcceptRemoteCommands()) {
       Serial.println("[BLYNK] Bo qua lenh nguon do server dang replay trang thai cu.");
-      pushCloudState();
       return;
   }
   logEvent("Nguon Box: " + String(turnOn ? "BAT" : "TAT") + " (Blynk)");
 #endif
   controlLogic.executeRemoteCommand(turnOn ? CMD_POWER_ON : CMD_POWER_OFF);
-  pushCloudState();
+  applyManualOverrideForPower(turnOn, "Blynk");
 }
 
 void NetworkManager::handleRemoteLightCommand(bool turnOn) {
 #ifdef USE_BLYNK
   if (!canAcceptRemoteCommands()) {
       Serial.println("[BLYNK] Bo qua lenh den do server dang replay trang thai cu.");
-      pushCloudState();
       return;
   }
   logEvent("Den: " + String(turnOn ? "BAT" : "TAT") + " (Blynk)");
 #endif
   controlLogic.executeRemoteCommand(turnOn ? CMD_LIGHT_ON : CMD_LIGHT_OFF);
-  pushCloudState();
+  applyManualOverrideForLight(turnOn, "Blynk");
 }
 
 void NetworkManager::onBlynkConnected() {
@@ -1191,7 +1697,8 @@ void NetworkManager::onBlynkConnected() {
   blynkInvalidToken = false;
   blynkReconnectBackoffMs = BLYNK_RECONNECT_BASE_MS;
   blynkRemoteGuardUntil = millis() + BLYNK_POST_CONNECT_GUARD_MS;
-  Serial.println("[BLYNK] Cloud da ket noi. Dang dong bo trang thai local va tam khoa lenh replay.");
+  Serial.println("[BLYNK] Cloud da ket noi. Dang replay log lich su va dong bo trang thai local.");
+  replayLogsToBlynk();
   pushCloudState();
 #endif
 }
@@ -1284,15 +1791,9 @@ void NetworkManager::handleWiFi() {
     isConnected = true;
     wifiLostFlag = false;
 
-    // Reset cờ trySecondary khi có mạng để lần sau nếu mất kết nối thì luôn ưu tiên dò mạng chính trước
-    static bool *trySecondaryPtr = nullptr;
-    // ... we'll handle trySecondary logic differently to avoid pointer tricks, just by ensuring trySecondary is properly reset
-
-    if (isApMode) {
+    if (isApMode && !apManualMode) {
         Serial.println("[WIFI] Co mang tro lai. Dang tat Rescue AP...");
-        WiFi.softAPdisconnect(true);
-        isApMode = false;
-        WiFi.mode(WIFI_STA);
+        requestApDisable("WiFi recovered");
     }
     return;
   }
@@ -1332,7 +1833,7 @@ void NetworkManager::handleWiFi() {
 
   if (wifiLostFlag && !isApMode && (millis() - wifiLostTime >= 300000)) {
       Serial.println("[AP] Mat ket noi 5 phut, tu dong bat Rescue AP!");
-      setupAP();
+      requestApEnable(false, "Long WiFi outage");
   }
 }
 
@@ -1352,10 +1853,8 @@ void NetworkManager::loop() {
     if (digitalRead(PIN_BTN_CONFIG) == LOW) {
       if (now - configPressStart >= CONFIG_HOLD_MS) {
         Serial.println("\n[SYSTEM] BAT CHE DO CAU HINH WIFI (AP) DO NGUOI DUNG BAM NUT!");
-        isLockedOut = false;
-        failedAuthCount = 0;
         WiFi.disconnect(true);
-        setupAP();
+        requestApEnable(true, "GPIO0 hold");
         configPressActive = false;
       }
     } else {
@@ -1363,38 +1862,8 @@ void NetworkManager::loop() {
     }
   }
 
-  if (interruptResetTriggered) {
-    interruptResetTriggered = false;
-    if (now - lastResetDebounce >= DEBOUNCE_MS) {
-      lastResetDebounce = now;
-      resetPressActive = true;
-      resetPressStart = now;
-    }
-  }
-
-  if (resetPressActive) {
-    if (digitalRead(PIN_BTN_RESET) == LOW) {
-      unsigned long holdMs = now - resetPressStart;
-      if (holdMs >= RESET_FACTORY_MS) {
-        Serial.println("\n[FACTORY RESET] Dang xoa toan bo cau hinh...");
-        Preferences p;
-        p.begin("mydoor", false); p.clear(); p.end();
-        p.begin("mydoor_state", false); p.clear(); p.end();
-        Serial.println("[FACTORY RESET] Hoan tat. Dang khoi dong lai he thong...");
-        pendingReboot = true;
-        rebootTime = now;
-        resetPressActive = false;
-      }
-    } else {
-      unsigned long holdMs = now - resetPressStart;
-      if (holdMs >= RESET_REBOOT_MS && holdMs < RESET_FACTORY_MS) {
-        Serial.println("\n[REBOOT] Lenh Reboot tu nut bam cung.");
-        pendingReboot = true;
-        rebootTime = now;
-      }
-      resetPressActive = false;
-    }
-  }
+  handleResetButton();
+  processPendingApAction();
 
 #ifndef USE_RAINMAKER
   handleWiFi();
@@ -1415,7 +1884,7 @@ void NetworkManager::loop() {
   handleBlynk();
 
   static unsigned long lastNTPCheck = 0;
-  if (millis() - lastNTPCheck >= 60000) { // Kiểm tra NTP và Auto Schedule mỗi 1 phút
+  if (millis() - lastNTPCheck >= 60000) {
       lastNTPCheck = millis();
       checkNTP();
   }
@@ -1424,20 +1893,30 @@ void NetworkManager::loop() {
   ElegantOTA.loop();
 #endif
 
-  // Đồng bộ Logs lên Cloud (chỉ chạy ở Core 0)
   syncLogsToCloud();
+  flushLogsToNvsIfNeeded(false);
 
-  // Quản lý Khóa AP 30 Phút
   if (isLockedOut && millis() - lockoutStartTime >= AP_LOCKOUT_MS) {
       isLockedOut = false;
       failedAuthCount = 0;
       Serial.println("[SECURITY] Hết 30 phút khóa AP. Mở khóa.");
   }
 
-  // Quản lý Reboot Non-blocking + Guard chống reboot loop
+  updateFaultLed(now);
+  updateStatusLeds();
+
+#ifdef USE_BLYNK
+  static unsigned long lastLedCloudSync = 0;
+  if (now - lastLedCloudSync >= 1000) {
+      lastLedCloudSync = now;
+      pushBlynkState();
+  }
+#endif
+
   if (pendingReboot && millis() - rebootTime >= 2000) {
       if (now - lastRestartAt >= RESTART_GUARD_MS) {
           lastRestartAt = now;
+          flushLogsToNvsIfNeeded(true);
           ESP.restart();
       } else {
           Serial.println("[GUARD] Bo qua reboot de tranh reboot-loop lien tuc.");
@@ -1445,7 +1924,6 @@ void NetworkManager::loop() {
       }
   }
 
-  // Gọi checkAPCycle mỗi vòng lặp bất kể chế độ
 #ifndef USE_RAINMAKER
   checkAPCycle();
 #endif

@@ -30,6 +30,27 @@
   - SSID: `SmartHomebyMinh`
   - Pass: `04011998`
 
-## 5) Việc kế tiếp (ngoài code)
+## 5) Hành vi AP/GPIO2/LED đã chốt (Blynk local web stack)
+- Endpoint Web mới: `POST /ap_mode` (auth bắt buộc).
+  - `state=1|on|true` -> bật Rescue AP.
+  - `state=0|off|false` -> tắt Rescue AP, trả về STA nếu có cấu hình WiFi.
+- GPIO2 (PIN_BTN_RESET) all-in-one theo nhấn-nhả:
+  - Nhấn ngắn (<3s): toggle AP ON/OFF.
+  - Giữ >=3s và <10s rồi thả: reboot.
+  - Giữ >=10s rồi thả: factory reset + reboot.
+- LED vàng `PIN_LED_WARN` (GPIO16):
+  - AP ON: chớp liên tục (non-blocking).
+  - AP OFF: tắt.
+  - Trigger reboot: flash 1 nhịp.
+  - Trigger factory reset: flash 3 nhịp.
+- Mapping runtime 4 LED:
+  - Blue `GPIO13`: ON khi có mạng STA (`isConnected && !isApMode`).
+  - Green `GPIO14`: ON khi hệ thống sẵn sàng (`!isFirstBoot && !pendingReboot`).
+  - Red `GPIO4`: ON khi lockout bảo mật (`isLockedOut`).
+  - Yellow `GPIO16`: trạng thái AP/reset như trên.
+- Blynk đã có VPIN giám sát LED:
+  - `V6` Blue, `V7` Green, `V8` Red, `V9` Yellow.
+
+## 6) Việc kế tiếp (ngoài code)
 - Soak test board thật cho cả Blynk và RainMaker theo checklist runtime.
 - Nếu public GitHub/CV: ưu tiên mô tả kiến trúc, test matrix, và ảnh thực tế vận hành.
