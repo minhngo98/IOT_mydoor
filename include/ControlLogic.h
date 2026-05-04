@@ -39,6 +39,12 @@ public:
     void setLocalTime(int hour, int min);
     void getLocalTimeSafe(int& hour, int& min);
 
+    // Telemetry runtime phục vụ soak test
+    uint32_t getQueueDropCount() const;
+    uint32_t getMaxObservedQueueDepth() const;
+    uint32_t getMinObservedHeap() const;
+    uint32_t getCurrentFreeHeap() const;
+
 private:
     Preferences preferences;
     bool currentPowerBoxState;
@@ -74,6 +80,11 @@ private:
 
     // Cảnh báo RAM
     void monitorHeap();
+    uint8_t lowHeapConsecutiveCount;
+    unsigned long lastHeapWarnLogMs;
+    uint32_t maxObservedQueueDepth;
+    uint32_t queueDropCount;
+    uint32_t minObservedHeap;
 };
 
 extern ControlLogic controlLogic;

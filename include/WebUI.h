@@ -163,12 +163,51 @@ const char* index_html = R"rawliteral(
         .status-msg { padding: 10px; border-radius: 6px; margin-bottom: 15px; display: none; text-align: center; font-weight: 500; }
         .status-msg.success { background: #dcfce7; color: #166534; display: block; }
         .status-msg.error { background: #fee2e2; color: #991b1b; display: block; }
+
+        @media (max-width: 430px) {
+            body { padding: 10px; }
+            .tab-content { padding: 14px; }
+            .control-grid { grid-template-columns: 1fr !important; gap: 10px; }
+            .relay-btns { flex-direction: column; }
+            .relay-btns .btn { width: 100%; }
+            .days-grid { grid-template-columns: repeat(2, 1fr); }
+            .secret-row { grid-template-columns: 1fr; gap: 4px; }
+            .time-flex { gap: 6px; }
+            #scheduleForm > div[style*="overflow-x: auto"] table,
+            #wifiForm > div[style*="overflow-x: auto"] table {
+                min-width: 100% !important;
+                font-size: 0.7rem;
+            }
+            #wifiForm > div[style*="overflow-x: auto"] table th,
+            #wifiForm > div[style*="overflow-x: auto"] table td,
+            #scheduleForm > div[style*="overflow-x: auto"] table th,
+            #scheduleForm > div[style*="overflow-x: auto"] table td {
+                padding: 6px !important;
+            }
+            #scheduleForm .time-flex select,
+            #scheduleForm label,
+            #scheduleForm .day-checkbox {
+                font-size: 0.7rem !important;
+            }
+            #scheduleForm select {
+                min-width: 52px;
+                padding: 4px !important;
+            }
+            #btnScan { padding: 6px 8px !important; font-size: 0.8rem !important; }
+            #rescueApForm > div[style*="grid-template-columns"] {
+                grid-template-columns: 1fr !important;
+            }
+            #rescueApForm > div[style*="grid-template-columns"] > div {
+                width: 100%;
+            }
+        }
     </style>
 </head>
 <body>
     
     <div class="container">
         <h1>⚙️ MyDoor Config</h1>
+        <div id="statusMsg" class="status-msg"></div>
 
         <div class="tabs">
             <button class="tab-btn active" onclick="openTab(event, 'tab-dash')">Dashboard</button>
@@ -302,7 +341,7 @@ const char* index_html = R"rawliteral(
         <!-- TAB 2: NETWORK & CLOUD -->
         <div id="tab-network" class="tab-content">
             <h2 class="section-title">📡 Mạng WiFi Chính</h2>
-            <form id="wifiForm" onsubmit="saveWifi(event)">
+            <form id="wifiForm" onsubmit="event.preventDefault()">
                 <div style="overflow-x: auto; margin-bottom: 15px;">
                     <table style="width: 100%; border-collapse: collapse; text-align: left; min-width: 500px;">
                         <tr>
@@ -342,6 +381,10 @@ const char* index_html = R"rawliteral(
                     </table>
                 </div>
 
+                <div style="display:flex; justify-content:flex-end; margin-bottom: 20px;">
+                    <button type="button" class="btn" id="btnSaveWifi" onclick="saveWifiSection()">Lưu WiFi</button>
+                </div>
+
                 <hr style="border: 0; border-top: 1px dashed var(--border); margin: 20px 0;">
                 <h2 class="section-title" style="margin-top: 30px;">☁️ Cấu Hình Đám Mây (Cloud)</h2>
 
@@ -368,7 +411,7 @@ const char* index_html = R"rawliteral(
                 </div>
 #endif
 
-                <button type="submit" class="btn" id="btnSaveWifi">Lưu WiFi & Cloud</button>
+                <button type="button" class="btn" id="btnSaveCloud" onclick="saveCloudSection()">Lưu Cloud</button>
             </form>
         </div>
 
@@ -388,10 +431,10 @@ const char* index_html = R"rawliteral(
                 <button type="submit" class="btn" id="btnSaveAdmin">Lưu Tài Khoản Admin</button>
             </form>
 
-            <h2 class="section-title" style="margin-top: 30px;">🆘 Quản Lý WiFi Khẩn Cấp (Rescue AP) & OTA</h2>
+            <h2 class="section-title" style="margin-top: 30px;">🆘 Quản Lý WiFi Khẩn Cấp (Rescue AP)</h2>
             <p style="font-size: 0.9rem; color: #64748b; margin-bottom: 15px;">Mạng Rescue AP sẽ tự phát ra (IP 10.10.10.1) nếu thiết bị không bắt được Wifi nhà bạn trong vòng 5 phút. Hãy đặt mật khẩu thủ công để dễ nhớ.</p>
-            <form id="rescueOtaForm" onsubmit="saveRescueOta(event)">
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+            <form id="rescueApForm" onsubmit="saveRescueAp(event)">
+                <div style="display: grid; grid-template-columns: 1fr; gap: 15px; margin-bottom: 15px;">
                     <div style="background: #f8fafc; padding: 15px; border-radius: 8px; border: 1px solid var(--border);">
                         <h3 style="font-size: 1rem; margin-top: 0; color: var(--primary);">Rescue AP</h3>
                         <div class="form-group">
@@ -404,19 +447,8 @@ const char* index_html = R"rawliteral(
                         </div>
                     </div>
 
-                    <div style="background: #f8fafc; padding: 15px; border-radius: 8px; border: 1px solid var(--border);">
-                        <h3 style="font-size: 1rem; margin-top: 0; color: var(--primary);">Cập nhật OTA</h3>
-                        <div class="form-group">
-                            <label>Tài khoản OTA</label>
-                            <input type="text" id="ota_user" name="ota_user" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Mật khẩu OTA</label>
-                            <input type="password" id="ota_pass" name="ota_pass" placeholder="Nhập mật khẩu (để trống: không đổi)">
-                        </div>
-                    </div>
                 </div>
-                <button type="submit" class="btn" id="btnSaveRescueOta">Lưu Cấu Hình Rescue AP & OTA</button>
+                <button type="submit" class="btn" id="btnSaveRescueAp">Lưu Cấu Hình Rescue AP</button>
             </form>
         </div>
 
@@ -426,7 +458,7 @@ const char* index_html = R"rawliteral(
 
             <div style="background: #fffbeb; border: 1px solid #fde68a; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
                 <h3 style="margin-top:0; color: #b45309;">☁️ Cập Nhật Firmware (OTA)</h3>
-                <p style="font-size: 0.95rem; color: #78350f;">Cho phép nạp file `.bin` mới trực tiếp qua WiFi mà không cần cắm cáp USB.</p>
+                <p style="font-size: 0.95rem; color: #78350f;">Cho phép nạp file `.bin` qua WiFi; trang OTA dùng chung tài khoản Admin WebUI (không có mật khẩu OTA riêng).</p>
                 <a href="/update" style="text-decoration: none;">
                     <button type="button" class="btn" style="background:#10b981;">Mở Trang Nạp Firmware (ElegantOTA)</button>
                 </a>
@@ -448,32 +480,36 @@ const char* index_html = R"rawliteral(
             evt.currentTarget.classList.add('active');
         }
 
-        function toggleRelay(type, turnOn) {
-            if (type.startsWith('door')) {
-                let cmd = type.replace('door_', '');
-                fetch('/control', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                    body: 'cmd=' + cmd
-                });
-            } else if (type === 'power') {
-                fetch('/power', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                    body: 'state=' + (turnOn ? '1' : '0')
-                }).then(() => updateStatus());
-            } else if (type === 'light') {
-                fetch('/light', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                    body: 'state=' + (turnOn ? '1' : '0')
-                }).then(() => updateStatus());
-            }
+        async function toggleRelay(type, turnOn) {
+            try {
+                if (type.startsWith('door')) {
+                    let cmd = type.replace('door_', '');
+                    await apiFetch('/control', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: 'cmd=' + cmd
+                    });
+                } else if (type === 'power') {
+                    await apiFetch('/power', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: 'state=' + (turnOn ? '1' : '0')
+                    });
+                    updateStatus();
+                } else if (type === 'light') {
+                    await apiFetch('/light', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: 'state=' + (turnOn ? '1' : '0')
+                    });
+                    updateStatus();
+                }
+            } catch (e) {}
         }
 
         async function fetchLogs() {
             try {
-                const res = await fetch('/logs');
+                const res = await apiFetch('/logs');
                 const text = await res.text();
                 const ta = document.getElementById('terminalLog');
                 ta.value = text;
@@ -485,9 +521,47 @@ const char* index_html = R"rawliteral(
             fetchLogs();
         }
 
+        function showStatus(message, type = 'error') {
+            const box = document.getElementById('statusMsg');
+            if (!box) return;
+            box.textContent = message;
+            box.className = 'status-msg ' + type;
+        }
+
+        let lastAuthNotifyMs = 0;
+        async function handleAuthError(res) {
+            let msg = 'Không thể xác thực phiên đăng nhập. Vui lòng đăng nhập lại.';
+            if (res.status === 401) {
+                msg = 'Sai tài khoản hoặc mật khẩu Admin. Vui lòng nhập lại.';
+            } else if (res.status === 429) {
+                const t = await res.text();
+                msg = t || 'Đăng nhập sai quá nhiều lần. Hệ thống đã tạm khóa 30 phút.';
+            } else if (res.status === 503) {
+                const t = await res.text();
+                msg = t || 'Thiết bị chưa được claim tài khoản Admin.';
+            }
+
+            showStatus(msg, 'error');
+            const now = Date.now();
+            if (now - lastAuthNotifyMs > 8000) {
+                alert(msg);
+                lastAuthNotifyMs = now;
+            }
+        }
+
+        async function apiFetch(url, options) {
+            const res = await fetch(url, options);
+            if (res.status === 401 || res.status === 429 || res.status === 503) {
+                await handleAuthError(res);
+                throw new Error('AUTH_REQUIRED');
+            }
+            return res;
+        }
+
         async function updateStatus() {
             try {
-                const data = await fetch('/get_config').then(r => r.json());
+                const resp = await apiFetch('/get_config');
+                const data = await resp.json();
 
                 const pStatus = document.getElementById('powerStatus');
                 pStatus.textContent = data.power_box_on ? 'ON' : 'OFF';
@@ -529,7 +603,8 @@ const char* index_html = R"rawliteral(
 
         async function loadDeviceConfig() {
             try {
-                const data = await fetch('/get_config').then(r => r.json());
+                const resp = await apiFetch('/get_config');
+                const data = await resp.json();
                 if(data.timezone !== undefined) document.getElementById('timezone').value = data.timezone;
                 if(data.onHour !== undefined) document.getElementById('onHour').value = data.onHour;
                 if(data.onMin !== undefined) document.getElementById('onMin').value = data.onMin;
@@ -541,13 +616,41 @@ const char* index_html = R"rawliteral(
                 if(data.l_offHour !== undefined) document.getElementById('lightOffHour').value = data.l_offHour;
                 if(data.l_offMin !== undefined) document.getElementById('lightOffMin').value = data.l_offMin;
 
+                if (document.getElementById('ssid') && data.ssid !== undefined) {
+                    const sel = document.getElementById('ssid');
+                    if (![...sel.options].some(o => o.value === data.ssid) && data.ssid) {
+                        const opt = document.createElement('option');
+                        opt.value = data.ssid;
+                        opt.textContent = data.ssid + ' (đã lưu)';
+                        sel.appendChild(opt);
+                    }
+                    sel.value = data.ssid || '';
+                }
+
+                if (document.getElementById('ssid2') && data.ssid2 !== undefined) {
+                    const sel2 = document.getElementById('ssid2');
+                    if (![...sel2.options].some(o => o.value === data.ssid2) && data.ssid2) {
+                        const opt2 = document.createElement('option');
+                        opt2.value = data.ssid2;
+                        opt2.textContent = data.ssid2 + ' (đã lưu)';
+                        sel2.appendChild(opt2);
+                    }
+                    sel2.value = data.ssid2 || '';
+                }
+
+                if (document.getElementById('password') && data.password !== undefined) {
+                    document.getElementById('password').value = data.password;
+                }
+                if (document.getElementById('password2') && data.pass2 !== undefined) {
+                    document.getElementById('password2').value = data.pass2;
+                }
+
                 if(document.getElementById('blynkTemplate') && data.blynkTemplate) document.getElementById('blynkTemplate').value = data.blynkTemplate;
                 if(document.getElementById('blynkName') && data.blynkName) document.getElementById('blynkName').value = data.blynkName;
                 if(document.getElementById('blynkAuth') && data.blynkAuth) document.getElementById('blynkAuth').value = data.blynkAuth;
 
                 if(data.rescue_ssid) document.getElementById('rescue_ap_ssid').value = data.rescue_ssid;
                 if(data.admin_user) {
-                    document.getElementById('ota_user').value = data.admin_user;
                     document.getElementById('admin_user_new').value = data.admin_user;
                 }
 
@@ -569,7 +672,7 @@ const char* index_html = R"rawliteral(
             btn.innerHTML = 'Đang quét... <span class="loader"></span>';
             btn.disabled = true;
             try {
-                const res = await fetch('/scan');
+                const res = await apiFetch('/scan');
                 const networks = await res.json();
                 let html = '<option value="">-- Chọn Mạng WiFi --</option>';
                 const unique = {};
@@ -601,48 +704,161 @@ const char* index_html = R"rawliteral(
 
             const fd = new FormData(e.target);
             try {
-                const res = await fetch(url, { method: 'POST', body: fd });
-                if(res.ok) alert('Lưu thành công!');
+                const res = await apiFetch(url, { method: 'POST', body: fd });
+                if(res.ok) {
+                    showStatus('Lưu thành công!', 'success');
+                    alert('Lưu thành công!');
+                }
                 else alert('Có lỗi xảy ra!');
             } catch(err) {
-                alert('Mất kết nối tới ESP32!');
+                if (err.message !== 'AUTH_REQUIRED') {
+                    alert('Mất kết nối tới ESP32!');
+                }
             }
             btn.innerHTML = oldText;
             btn.disabled = false;
         }
 
-        function saveWifi(e) { submitForm(e, '/save_wifi', 'btnSaveWifi'); }
+        async function submitPartialForm(url, btnId, builder, successMsg) {
+            const btn = document.getElementById(btnId);
+            const oldText = btn.innerHTML;
+            btn.innerHTML = 'Đang lưu... <span class="loader"></span>';
+            btn.disabled = true;
+
+            try {
+                const fd = builder();
+                const res = await apiFetch(url, { method: 'POST', body: fd });
+                if (res.ok) {
+                    showStatus(successMsg || 'Lưu thành công!', 'success');
+                    alert(successMsg || 'Lưu thành công!');
+                } else {
+                    const errText = await res.text();
+                    alert(errText || 'Có lỗi xảy ra!');
+                }
+            } catch (err) {
+                if (err.message !== 'AUTH_REQUIRED') {
+                    alert('Mất kết nối tới ESP32!');
+                }
+            }
+
+            btn.innerHTML = oldText;
+            btn.disabled = false;
+        }
+
+        async function saveWifiSection() {
+            const btn = document.getElementById('btnSaveWifi');
+            const oldText = btn.innerHTML;
+            btn.innerHTML = 'Đang lưu... <span class="loader"></span>';
+            btn.disabled = true;
+
+            const fd = new FormData();
+            fd.append('ssid', document.getElementById('ssid').value || '');
+            fd.append('password', document.getElementById('password').value || '');
+            fd.append('ssid2', document.getElementById('ssid2').value || '');
+            fd.append('pass2', document.getElementById('password2').value || '');
+
+            try {
+                let res = await apiFetch('/save_wifi', { method: 'POST', body: fd });
+                if (res.status === 409) {
+                    const confirmMsg = await res.text();
+                    const ok = confirm(confirmMsg || 'Thay đổi WiFi cần khởi động lại thiết bị để áp dụng. Bạn có muốn reboot ngay không?');
+                    if (!ok) {
+                        alert('Đã lưu thông tin WiFi, chưa reboot theo lựa chọn của bạn.');
+                        btn.innerHTML = oldText;
+                        btn.disabled = false;
+                        return;
+                    }
+                    fd.append('reboot_confirm', '1');
+                    res = await apiFetch('/save_wifi', { method: 'POST', body: fd });
+                }
+
+                if (res.ok) {
+                    const body = await res.text();
+                    if (body === 'OK_REBOOT') {
+                        alert('Lưu WiFi thành công. Thiết bị đang khởi động lại để áp dụng cấu hình mạng.');
+                    } else if (body === 'NO_CHANGES') {
+                        alert('Không có thay đổi WiFi để lưu.');
+                    } else {
+                        alert('Lưu WiFi thành công!');
+                    }
+                } else {
+                    const errText = await res.text();
+                    alert(errText || 'Có lỗi xảy ra khi lưu WiFi.');
+                }
+            } catch (err) {
+                if (err.message !== 'AUTH_REQUIRED') {
+                    alert('Mất kết nối tới ESP32!');
+                }
+            }
+
+            btn.innerHTML = oldText;
+            btn.disabled = false;
+        }
+
+        async function saveCloudSection() {
+            const btn = document.getElementById('btnSaveCloud');
+            const oldText = btn.innerHTML;
+            btn.innerHTML = 'Đang lưu... <span class="loader"></span>';
+            btn.disabled = true;
+
+            try {
+                const fd = new FormData();
+                const tpl = document.getElementById('blynkTemplate');
+                const name = document.getElementById('blynkName');
+                const auth = document.getElementById('blynkAuth');
+                if (tpl) fd.append('blynkTemplate', tpl.value || '');
+                if (name) fd.append('blynkName', name.value || '');
+                if (auth) fd.append('blynkAuth', auth.value || '');
+
+                const res = await apiFetch('/save_wifi', { method: 'POST', body: fd });
+                if (res.ok) {
+                    const body = await res.text();
+                    if (body === 'NO_CHANGES') {
+                        alert('Không có thay đổi Cloud để lưu.');
+                    } else {
+                        alert('Lưu Cloud thành công! Không cần khởi động lại thiết bị.');
+                    }
+                } else {
+                    const errText = await res.text();
+                    alert(errText || 'Có lỗi xảy ra khi lưu Cloud.');
+                }
+            } catch (err) {
+                if (err.message !== 'AUTH_REQUIRED') {
+                    alert('Mất kết nối tới ESP32!');
+                }
+            }
+
+            btn.innerHTML = oldText;
+            btn.disabled = false;
+        }
+
         function saveSchedule(e) { submitForm(e, '/save_schedule', 'btnSaveSchedule'); }
         function saveAdmin(e) { submitForm(e, '/save_admin', 'btnSaveAdmin'); }
 
-        async function saveRescueOta(e) {
+        async function saveRescueAp(e) {
             e.preventDefault();
-            const btn = document.getElementById('btnSaveRescueOta');
+            const btn = document.getElementById('btnSaveRescueAp');
             const oldText = btn.innerHTML;
             btn.innerHTML = 'Đang lưu... <span class="loader"></span>';
             btn.disabled = true;
 
             const fd = new FormData(e.target);
-
             const rescueFd = new FormData();
             rescueFd.append('rescue_ap_ssid', fd.get('rescue_ap_ssid'));
             if(fd.get('rescue_ap_pass')) rescueFd.append('rescue_ap_pass', fd.get('rescue_ap_pass'));
 
-            const adminFd = new FormData();
-            adminFd.append('admin_user', fd.get('ota_user'));
-            if(fd.get('ota_pass')) adminFd.append('admin_pass', fd.get('ota_pass'));
-
             try {
-                let r1 = await fetch('/save_rescue_ap', { method: 'POST', body: rescueFd });
-                let r2 = await fetch('/save_admin', { method: 'POST', body: adminFd });
-
-                if (r1.ok && r2.ok) {
-                    alert('Lưu cấu hình Rescue AP và OTA thành công!');
+                const res = await apiFetch('/save_rescue_ap', { method: 'POST', body: rescueFd });
+                if (res.ok) {
+                    alert('Lưu cấu hình Rescue AP thành công!');
                 } else {
-                    alert('Có lỗi xảy ra khi lưu cấu hình.');
+                    const errText = await res.text();
+                    alert(errText || 'Có lỗi xảy ra khi lưu cấu hình.');
                 }
             } catch(err) {
-                alert('Mất kết nối tới ESP32!');
+                if (err.message !== 'AUTH_REQUIRED') {
+                    alert('Mất kết nối tới ESP32!');
+                }
             }
 
             btn.innerHTML = oldText;
@@ -651,8 +867,19 @@ const char* index_html = R"rawliteral(
 
         async function rebootESP() {
             if(confirm('Bạn có chắc muốn Khởi động lại hệ thống?')) {
-                await fetch('/reboot', { method: 'POST' });
-                alert('Hệ thống đang khởi động lại. Vui lòng kết nối lại WiFi nhà bạn sau 10 giây.');
+                try {
+                    const res = await apiFetch('/reboot', { method: 'POST' });
+                    if (res.ok) {
+                        alert('Hệ thống đang khởi động lại. Vui lòng kết nối lại WiFi nhà bạn sau 10 giây.');
+                    } else {
+                        const errText = await res.text();
+                        alert(errText || 'Không thể khởi động lại thiết bị lúc này.');
+                    }
+                } catch (err) {
+                    if (err.message !== 'AUTH_REQUIRED') {
+                        alert('Mất kết nối tới ESP32!');
+                    }
+                }
             }
         }
     </script>

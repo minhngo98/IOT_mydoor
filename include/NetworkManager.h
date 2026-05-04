@@ -32,6 +32,10 @@ class AsyncWebServerRequest;
 #include <esp_wifi.h>
 #include <esp_event.h>
 #include <esp_log.h>
+#include <WiFiProv.h>
+#include <wifi_provisioning/manager.h>
+#include <wifi_provisioning/scheme_ble.h>
+#include <wifi_provisioning/scheme_softap.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/event_groups.h>
@@ -85,14 +89,14 @@ public:
     void syncLogsToCloud();
     void checkNTP();
     void pushCloudState();
-    void pushBlynkState();
+    void pushBlynkState(bool force = false);
 #ifdef USE_RAINMAKER
     void setupRainMaker();
     void startRainMakerProvisioning();
     void stopRainMakerProvisioning();
     void pushRainMakerState();
 #endif
-    void handleRemoteDoorCommand(RemoteCommand cmd);
+    void handleRemoteDoorCommand(RemoteCommand cmd, const char* source = "Remote");
     void handleRemotePowerCommand(bool turnOn);
     void handleRemoteLightCommand(bool turnOn);
     void onBlynkConnected();
@@ -100,7 +104,10 @@ public:
     bool canAcceptRemoteCommands() const;
     void applyManualOverrideForPower(bool turnOn, const char* source);
     void applyManualOverrideForLight(bool turnOn, const char* source);
+    void saveManualOverrideState();
     void flushLogsToNvsIfNeeded(bool force);
+    bool requestControlledReboot(const char* reason);
+    String getHealthSnapshot() const;
 
     // Log Terminal
     void logEvent(const String& message);
@@ -113,6 +120,7 @@ private:
 #endif
     Preferences preferences;
     SemaphoreHandle_t stringMutex; // Mutex bảo vệ truy cập biến String giữa các luồng
+    SemaphoreHandle_t stateMutex;  // Mutex bảo vệ state runtime đa ngữ cảnh
 
     // Lưu trữ log tối đa (Ring buffer cơ bản)
     String eventLogs[15];
@@ -153,6 +161,7 @@ private:
     unsigned long lastConfigDebounce;
 
     bool resetPressActive;
+    bool resetFactoryTriggered;
     unsigned long resetPressStart;
     unsigned long lastResetDebounce;
 
@@ -187,6 +196,9 @@ private:
 
     String detectLogTag(const String& message) const;
     String formatLogWithTag(const String& message, const String& tag, time_t epoch) const;
+    bool shouldPersistLog(const String& message) const;
+    void markInternetDisconnected(unsigned long nowMs);
+    void markInternetConnected(unsigned long nowMs);
     String renderPersistentLogsForClient() const;
     void loadPersistentLogs();
     void rebuildRuntimeLogsFromPersistent();
@@ -220,11 +232,31 @@ private:
 
     bool webServerInitialized;
     bool otaInitialized;
+
+    unsigned long wifiReconnectBackoffMs;
+    unsigned long nextWiFiRetryAt;
+
     unsigned long lastBlynkConnectAttempt;
     unsigned long blynkReconnectBackoffMs;
     unsigned long blynkRemoteGuardUntil;
     bool blynkWasConnected;
     bool blynkInvalidToken;
+    bool cloudStateInitialized;
+    bool lastPushedPowerState;
+    bool lastPushedLightState;
+    bool lastPushedBlue;
+    bool lastPushedGreen;
+    bool lastPushedRed;
+    bool lastPushedYellow;
+    unsigned long lastBlynkStatePushMs;
+
+    uint32_t wifiReconnectAttempts;
+    uint32_t blynkReconnectAttempts;
+    uint32_t rainmakerReprovisionAttempts;
+    esp_reset_reason_t bootResetReason;
+    time_t lastInternetDisconnectEpoch;
+    time_t lastInternetReconnectEpoch;
+    uint32_t lastInternetOutageSec;
 
 #ifdef USE_RAINMAKER
     esp_rmaker_node_t *rainmakerNode;
@@ -234,7 +266,14 @@ private:
     String rainmakerDoorState;
 
     bool rainmakerInitialized;
+    bool rainmakerProvisioningActive;
+    bool rainmakerProvManagerInitialized;
+    unsigned long rainmakerReprovisionBackoffMs;
+    unsigned long nextRainmakerReprovisionAt;
     EventGroupHandle_t wifiEventGroup;
+    char rainmakerProvServiceName[16];
+    char rainmakerProvPop[13];
+    bool rainmakerForceResetProvisioning;
     #define WIFI_CONNECTED_BIT BIT0
     #define RM_MQTT_CONNECTED_BIT BIT1
     #define RM_FACTORY_RESET_BIT BIT2
@@ -242,6 +281,7 @@ private:
     static esp_err_t write_cb_wrapper(const esp_rmaker_device_t *device, const esp_rmaker_param_t *param, const esp_rmaker_param_val_t val, void *priv_data, esp_rmaker_write_ctx_t *ctx);
     static void rainmaker_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
     static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
+    static void provisioning_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
 #endif
 };
 

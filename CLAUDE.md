@@ -21,6 +21,13 @@
 - RainMaker state cửa không còn hardcode `STOPPED`; đã suy diễn theo lệnh gần nhất (`UP/DOWN/STOPPED`).
 - Blynk giữ lockout 30 phút, guard replay sau reconnect, OTA auth đồng bộ theo admin.
 - UI first-boot đã đồng bộ policy mật khẩu >= 8 ký tự.
+- Đã hardening phase 1/2/3 cho vận hành 24/7:
+  - Heap low hysteresis + controlled reboot guard (tránh reset nhạy).
+  - Queue lệnh Core0->Core1 tăng `COMMAND_QUEUE_LEN=12`, có thống kê drop/peak.
+  - Reconnect WiFi/Blynk/RainMaker dùng backoff + jitter + max cap.
+  - Đồng bộ cloud ưu tiên state-change, heartbeat theo `CLOUD_STATE_HEARTBEAT_MS`.
+  - Batch sync log giới hạn theo `LOG_SYNC_BATCH_PER_LOOP`.
+  - Có endpoint `GET /health` (auth) + health log định kỳ `HEALTH_REPORT_INTERVAL_MS`.
 
 ## 4) Rule bảo mật/vận hành
 - Không dùng `delay()` trong callback web async.
@@ -30,11 +37,11 @@
   - SSID: `SmartHomebyMinh`
   - Pass: `04011998`
 
-## 5) Hành vi AP/GPIO2/LED đã chốt (Blynk local web stack)
+## 5) Hành vi AP/GPIO21/LED đã chốt (Blynk local web stack)
 - Endpoint Web mới: `POST /ap_mode` (auth bắt buộc).
   - `state=1|on|true` -> bật Rescue AP.
   - `state=0|off|false` -> tắt Rescue AP, trả về STA nếu có cấu hình WiFi.
-- GPIO2 (PIN_BTN_RESET) all-in-one theo nhấn-nhả:
+- GPIO21 (PIN_BTN_RESET) all-in-one theo nhấn-nhả:
   - Nhấn ngắn (<3s): toggle AP ON/OFF.
   - Giữ >=3s và <10s rồi thả: reboot.
   - Giữ >=10s rồi thả: factory reset + reboot.

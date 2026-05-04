@@ -37,7 +37,7 @@ Mở terminal tại thư mục dự án:
 - Có thể dùng trực tiếp từ form/script nội bộ hoặc tool HTTP theo hạ tầng hiện có.
 - Lưu ý: endpoint này vẫn áp dụng lockout/auth như các endpoint admin khác.
 
-### 4.1.2 Nút cứng GPIO2 (All-in-one)
+### 4.1.2 Nút cứng GPIO21 (All-in-one)
 - Nhấn ngắn (<3s): bật/tắt Rescue AP.
 - Giữ >=3s rồi thả: reboot thiết bị.
 - Giữ >=10s rồi thả: factory reset rồi reboot.
@@ -50,8 +50,8 @@ Mở terminal tại thư mục dự án:
 - Yellow GPIO16: trạng thái AP/reset:
   - AP đang phát: LED vàng chớp liên tục.
   - AP tắt: LED vàng tắt.
-  - Reboot từ GPIO2: LED vàng flash 1 nhịp.
-  - Factory reset từ GPIO2: LED vàng flash 3 nhịp.
+  - Reboot từ GPIO21: LED vàng flash 1 nhịp.
+  - Factory reset từ GPIO21: LED vàng flash 3 nhịp.
 
 ### 4.1.4 Blynk giám sát LED
 - V6: Blue LED state
@@ -90,12 +90,12 @@ Mở terminal tại thư mục dự án:
 - Đăng nhập bằng tài khoản Admin.
 - Chọn file `.bin` cần nạp -> Upload -> chờ reboot.
 
-### 4.4 Log trạng thái persistent 3 ngày
-- Firmware lưu lịch sử log vào NVS (namespace `mydoor_logs`), giữ tối đa 3 ngày gần nhất.
+### 4.4 Log trạng thái persistent 2 ngày
+- Firmware lưu lịch sử log vào NVS (namespace `mydoor_logs`), giữ tối đa 2 ngày gần nhất.
 - Sau reboot/mất điện, Blynk V4 sẽ replay lại log cũ -> mới.
 - API đọc log:
   - Admin: `GET /logs` (cần auth)
-  - Public read-only: `GET /public_logs` (không cần auth)
+  - Public read-only: `GET /public_logs` (hiện tại cũng cần auth Admin)
 - Chuẩn tag hiển thị trên log:
   - `[ON]` -> trạng thái ON (màu gợi ý: xanh lá)
   - `[OFF]` -> trạng thái OFF (màu gợi ý: xám)
@@ -108,13 +108,59 @@ Mở terminal tại thư mục dự án:
   - Scheduler tạm thời không ép trạng thái relay đó.
 - Override chỉ giữ đến mốc lịch kế tiếp (khi lịch đổi ON<->OFF), sau đó tự clear và automation lấy lại quyền.
 
-## 5) Dùng bản RainMaker (cấu hình App)
-1. Nạp firmware RainMaker.
-2. Mở app **ESP RainMaker** trên điện thoại.
-3. Bật Bluetooth, Add Device.
-4. Chọn WiFi nhà và hoàn tất provisioning.
+## 5) Dùng bản RainMaker (iOS cho người mới)
+
+### 5.1 Chuẩn bị trên iPhone
+1. Nạp firmware RainMaker cho ESP32.
+2. Cài app **ESP RainMaker** từ App Store.
+3. Mở app và tạo tài khoản/đăng nhập.
+4. Vào **Settings > ESP RainMaker** trên iOS, bật quyền:
+   - Bluetooth
+   - Local Network
+   - Notifications (khuyến nghị để nhận cảnh báo online/offline)
+5. Đảm bảo iPhone đang nối WiFi **2.4GHz** (nhiều router gộp 2.4/5GHz, nếu add lỗi hãy tách SSID tạm thời để test).
+
+### 5.2 Add device lần đầu (claim thiết bị)
+1. Trong app, chọn **Add Device**.
+2. Đưa thiết bị vào provisioning mode theo firmware RainMaker hiện tại.
+3. App sẽ quét BLE, chọn đúng thiết bị MyDoor.
+4. Chọn WiFi nhà, nhập mật khẩu, xác nhận Provision.
+5. Chờ trạng thái thiết bị chuyển **Online** trong app.
+
+### 5.3 Kiểm tra điều khiển cơ bản sau khi add
+1. Thử bật/tắt **POWER BOX (GPIO33)**.
+2. Thử bật/tắt **LIGHT (GPIO32)**.
+3. Thử lệnh cửa (UP/STOP/DOWN) và quan sát phản hồi trạng thái.
+4. Nếu user vừa thao tác tay trái với lịch timer, trạng thái phải giữ đến mốc lịch kế tiếp (manual override).
+
+### 5.4 Lỗi thường gặp trên iOS và cách xử lý
+- **Không tìm thấy thiết bị khi Add Device**
+  - Kiểm tra đã bật Bluetooth và Local Network permission.
+  - Đưa iPhone lại gần ESP32 (1-2m), tắt/mở lại Bluetooth.
+- **Add xong nhưng thiết bị Offline**
+  - Kiểm tra đúng mật khẩu WiFi 2.4GHz.
+  - Kiểm tra router không chặn client mới (MAC filter / isolation).
+- **Đổi WiFi nhà mới**
+  - Re-provision thiết bị từ app hoặc đưa thiết bị về chế độ provisioning theo hướng dẫn firmware.
+- **Thiết bị phản hồi chậm hoặc không nhận lệnh**
+  - Kiểm tra RSSI WiFi tại vị trí lắp đặt.
+  - Reboot thiết bị; nếu vẫn lỗi thì kiểm tra log/health endpoint trên WebUI (bản Blynk).
 
 Khi mất mạng dài, thiết bị tự bật lại provisioning; có mạng lại sẽ tự dừng.
+
+### 5.5 Khi nào nên factory reset
+- Chỉ dùng factory reset khi:
+  - quên thông tin claim và không thể re-provision,
+  - đổi chủ thiết bị,
+  - hoặc trạng thái cấu hình bị lỗi không phục hồi được bằng reboot/re-provision.
+- Sau factory reset cần cấu hình lại từ đầu (Admin/WiFi/Cloud tùy firmware đang chạy).
+
+### 5.6 Chuyển RainMaker <-> Blynk an toàn
+- Trước khi đổi firmware, ghi nhận nhanh:
+  - trạng thái POWER/LIGHT hiện tại,
+  - lịch timer,
+  - tài khoản Admin Web.
+- Sau khi flash firmware còn lại, kiểm tra lại ngay 3 mục trên trước khi vận hành thực tế.
 
 ## 6) Đổi qua lại Blynk <-> RainMaker
 ### Từ Blynk sang RainMaker
@@ -155,14 +201,14 @@ Khi mất mạng dài, thiết bị tự bật lại provisioning; có mạng l�
    - Thiết bị vẫn duy trì/khôi phục STA.
    - LED vàng tắt.
 
-### 8.3 Script test GPIO2 all-in-one
-1. Nhấn ngắn GPIO2 (<3s):
+### 8.3 Script test GPIO21 all-in-one
+1. Nhấn ngắn GPIO21 (<3s):
    - [ ] Lần 1: AP bật.
    - [ ] Lần 2: AP tắt.
-2. Giữ GPIO2 >=3s và <10s rồi thả:
+2. Giữ GPIO21 >=3s và <10s rồi thả:
    - [ ] Thiết bị reboot.
    - [ ] LED vàng flash 1 nhịp trước reboot.
-3. Giữ GPIO2 >=10s rồi thả:
+3. Giữ GPIO21 >=10s rồi thả:
    - [ ] Xóa NVS `mydoor` + `mydoor_state`.
    - [ ] Thiết bị reboot.
    - [ ] LED vàng flash 3 nhịp trước reboot.
@@ -187,7 +233,7 @@ Khi mất mạng dài, thiết bị tự bật lại provisioning; có mạng l�
    - [ ] V4 replay lại history sau reconnect.
 4. Gọi API đọc log:
    - [ ] `GET /logs` với admin auth trả về log.
-   - [ ] `GET /public_logs` không auth vẫn đọc được log.
+   - [ ] `GET /public_logs` với admin auth trả về log (đã hardening, không còn public không-auth).
 5. Kỳ vọng format:
    - [ ] Log có tag `[ON]` / `[OFF]` / `[AUTO]` đúng ngữ nghĩa.
 
@@ -208,6 +254,25 @@ Khi mất mạng dài, thiết bị tự bật lại provisioning; có mạng l�
 - [ ] Blynk reconnect/guard vẫn hoạt động như trước.
 - [ ] Không vi phạm kiến trúc Core0->Core1 queue.
 
-### 8.8 Tiêu chí PASS/FAIL
-- PASS: tất cả checkbox đều đạt.
+### 8.8 Script test health telemetry (phase 3)
+1. Điều kiện đầu vào:
+   - Đã login Admin trên WebUI.
+   - Thiết bị online STA (không ở AP mode).
+2. Bước thực hiện:
+   - Gọi `GET /health`.
+3. Kỳ vọng response JSON có đủ trường:
+   - `heap_now`, `heap_min`
+   - `queue_drop`, `queue_peak`
+   - `wifi_reconnect`, `blynk_reconnect`, `rm_reprovision`
+   - `is_connected`, `is_ap_mode`, `reset_reason_code`
+4. Kỳ vọng vận hành:
+   - `heap_min` không trôi giảm đơn điệu theo thời gian.
+   - `queue_drop` không tăng liên tục khi thao tác bình thường.
+   - Bộ đếm reconnect tăng có kiểm soát khi fault-injection mất mạng.
+
+### 8.9 Tiêu chí PASS/FAIL
+- PASS:
+  - Tất cả checkbox đều đạt.
+  - Soak test 24h không có reboot bất thường.
+  - Khuyến nghị gate production: soak 72h trước khi nghiệm thu cuối.
 - FAIL: chỉ cần 1 mục không đạt, lưu log Serial + timestamp + bước test và rollback về bản ổn định gần nhất để khoanh vùng.

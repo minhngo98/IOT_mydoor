@@ -27,12 +27,14 @@ ControlLogic::ControlLogic() :
     currentLightState((rtcLightStateMagic == RTC_LIGHT_STATE_MAGIC) ? rtcLightState : false),
     interruptBtnLightTriggered(false),
     activeRelayPin(0), relayTriggerTime(0), isRelayActive(false),
-    currentHour(-1), currentMin(-1), timeMutex(NULL), commandQueue(NULL) {
+    currentHour(-1), currentMin(-1), timeMutex(NULL), commandQueue(NULL),
+    lowHeapConsecutiveCount(0), lastHeapWarnLogMs(0), maxObservedQueueDepth(0),
+    queueDropCount(0), minObservedHeap(0xFFFFFFFFUL) {
 }
 
 void ControlLogic::begin() {
     if (timeMutex == NULL) timeMutex = xSemaphoreCreateMutex();
-    if (commandQueue == NULL) commandQueue = xQueueCreate(5, sizeof(RemoteCommand));
+    if (commandQueue == NULL) commandQueue = xQueueCreate(COMMAND_QUEUE_LEN, sizeof(RemoteCommand));
 
     initGPIO();
     loadPersistedState();
@@ -142,8 +144,22 @@ void ControlLogic::handleInterruptBtnLight() {
 void ControlLogic::executeRemoteCommand(RemoteCommand cmd) {
     // Nhận lệnh từ Task Network (Core 0), đưa vào Queue để Core 1 xử lý
     if (commandQueue != NULL) {
-        if (xQueueSend(commandQueue, &cmd, 0) != pdTRUE) {
-            Serial.println("[LOI] Command Queue Day! Khong the xu ly lenh.");
+        if (xQueueSend(commandQueue, &cmd, pdMS_TO_TICKS(COMMAND_QUEUE_SEND_TIMEOUT_MS)) != pdTRUE) {
+            queueDropCount++;
+            static unsigned long lastQueueFullLogMs = 0;
+            unsigned long now = millis();
+            if (now - lastQueueFullLogMs >= 2000) {
+                lastQueueFullLogMs = now;
+                Serial.printf("[LOI] Command Queue Day! DropCount=%lu\n", static_cast<unsigned long>(queueDropCount));
+            }
+        }
+
+        UBaseType_t used = uxQueueMessagesWaiting(commandQueue);
+        if (used > maxObservedQueueDepth) {
+            maxObservedQueueDepth = used;
+            if (maxObservedQueueDepth >= (COMMAND_QUEUE_LEN - 1)) {
+                Serial.printf("[QUEUE] Muc su dung cao: %u/%u\n", static_cast<unsigned>(maxObservedQueueDepth), static_cast<unsigned>(COMMAND_QUEUE_LEN));
+            }
         }
     }
 }
@@ -228,10 +244,53 @@ void ControlLogic::monitorHeap() {
     if (netManager.isOtaRunning) return;
 
     uint32_t freeHeap = ESP.getFreeHeap();
-    if (freeHeap < MIN_FREE_HEAP) {
-        Serial.printf("\n[CRITICAL] Free Heap qua thap (%d bytes)! Dang Reboot bao ve RAM...\n", freeHeap);
-        ESP.restart();
+    if (freeHeap < minObservedHeap) {
+        minObservedHeap = freeHeap;
     }
+
+    if (freeHeap < MIN_FREE_HEAP) {
+        if (lowHeapConsecutiveCount < 255) {
+            lowHeapConsecutiveCount++;
+        }
+
+        unsigned long now = millis();
+        if (lowHeapConsecutiveCount == 1 || now - lastHeapWarnLogMs >= HEAP_LOW_LOG_INTERVAL_MS) {
+            lastHeapWarnLogMs = now;
+            Serial.printf("\n[WARN] Free Heap thap (%lu bytes), streak=%u/%u\n",
+                          static_cast<unsigned long>(freeHeap),
+                          static_cast<unsigned>(lowHeapConsecutiveCount),
+                          static_cast<unsigned>(HEAP_LOW_CONSECUTIVE_LIMIT));
+        }
+
+        if (lowHeapConsecutiveCount >= HEAP_LOW_CONSECUTIVE_LIMIT) {
+            if (netManager.requestControlledReboot("Low heap persisted")) {
+                Serial.printf("\n[CRITICAL] Free Heap duy tri qua thap (%lu bytes)! Yeu cau reboot co kiem soat.\n",
+                              static_cast<unsigned long>(freeHeap));
+            }
+            lowHeapConsecutiveCount = 0;
+        }
+        return;
+    }
+
+    if (freeHeap >= (MIN_FREE_HEAP + MIN_FREE_HEAP_RECOVERY_MARGIN)) {
+        lowHeapConsecutiveCount = 0;
+    }
+}
+
+uint32_t ControlLogic::getQueueDropCount() const {
+    return queueDropCount;
+}
+
+uint32_t ControlLogic::getMaxObservedQueueDepth() const {
+    return maxObservedQueueDepth;
+}
+
+uint32_t ControlLogic::getMinObservedHeap() const {
+    return minObservedHeap;
+}
+
+uint32_t ControlLogic::getCurrentFreeHeap() const {
+    return ESP.getFreeHeap();
 }
 
 void ControlLogic::loop() {

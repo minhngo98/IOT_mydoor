@@ -8,6 +8,11 @@
 
 MyDoor IoT là Firmware cấp công nghiệp (Professional Grade) điều khiển cửa cuốn và thiết bị phụ trợ (đèn chiếu sáng) sử dụng vi điều khiển ESP32. Đặc biệt, hệ thống hỗ trợ song song 2 nền tảng Cloud độc lập: **Blynk** và **ESP RainMaker**, cho phép chuyển đổi Firmware (OTA) linh hoạt mà không làm mất trạng thái hay kết nối mạng cơ bản.
 
+## Trạng thái vận hành hiện tại (ngắn gọn)
+- Build pass cho cả `blynk` và `rainmaker`.
+- Firmware đã áp dụng hardening 24/7: heap hysteresis, queue burst tolerance, reconnect backoff + jitter.
+- Có health telemetry qua `GET /health` (auth) và health log định kỳ để phục vụ soak test/ nghiệm thu.
+
 ---
 
 ## 📸 Giao diện trực quan (Gallery)

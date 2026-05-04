@@ -30,10 +30,10 @@
 #define PIN_RELAY_STOP  27  // IN3: DỪNG
 
 // Relay Cấp/Ngắt Nguồn Tổng Box Cửa Cuốn
-#define PIN_RELAY_POWER 32  // IN4: Điều khiển nguồn box điều khiển (Bật ban ngày, Tắt ban đêm)
+#define PIN_RELAY_POWER 33  // IN4: Điều khiển nguồn box điều khiển (Bật ban ngày, Tắt ban đêm)
 
 // Relay Điều khiển Đèn Chiếu Sáng
-#define PIN_RELAY_LIGHT 33  // IN5: Điều khiển Đèn (Lighting)
+#define PIN_RELAY_LIGHT 32  // IN5: Điều khiển Đèn (Lighting)
 
 // Đèn LED Trạng thái (Active LOW: Sáng khi kéo xuống GND)
 #define PIN_LED_WIFI    13  // BLUE: Trạng thái WiFi/Cloud
@@ -43,8 +43,8 @@
 
 // Nút nhấn vật lý
 #define PIN_BTN_CONFIG  0   // Nút BOOT: Nhấn giữ 3s để Wake-up AP
-#define PIN_BTN_RESET   2   // Nút cứng Reset (Chung): Nhấn giữ 3s -> Reboot, Nhấn giữ 10s -> Factory Reset
-#define PIN_BTN_LIGHT   15  // Nút cứng Điều khiển Đèn tại chỗ
+#define PIN_BTN_RESET   21  // Nút cứng Reset (Chung): Nhấn giữ 3s -> Reboot, Nhấn giữ 10s -> Factory Reset
+#define PIN_BTN_LIGHT   22  // Nút cứng Điều khiển Đèn tại chỗ
 
 // ==========================================
 // 3. LOGIC STATES (CỰC KỲ QUAN TRỌNG ĐỂ KHÔNG CHẠP CHÁY)
@@ -53,9 +53,9 @@
 #define RELAY_ON  LOW
 #define RELAY_OFF HIGH
 
-// Mạch Relay 4 cắt nguồn (kích mức thấp)
-#define POWER_ON  LOW
-#define POWER_OFF HIGH
+// Mạch Relay 4 cắt nguồn (kích mức cao)
+#define POWER_ON  HIGH
+#define POWER_OFF LOW
 
 // LED Active LOW
 #define LED_ON    LOW
@@ -72,8 +72,16 @@
 #define BLYNK_CONNECT_TIMEOUT_MS         1500
 #define BLYNK_RECONNECT_BASE_MS          5000
 #define BLYNK_RECONNECT_MAX_MS           60000
+#define BLYNK_RECONNECT_JITTER_MS         700
 #define BLYNK_POST_CONNECT_GUARD_MS      2500
 #define BLYNK_SSL_HANDSHAKE_TIMEOUT_SEC  3
+#define CLOUD_STATE_HEARTBEAT_MS         5000
+#define LOG_SYNC_BATCH_PER_LOOP             4
+#define WIFI_RECONNECT_MAX_MS           60000
+#define WIFI_RECONNECT_JITTER_MS          800
+#define RAINMAKER_REPROVISION_MAX_MS  1800000
+#define RAINMAKER_REPROVISION_JITTER_MS 3000
+#define HEALTH_REPORT_INTERVAL_MS      60000
 
 // FreeRTOS Yield Constants
 #define YIELD_WIFI_MS      20     // Thời gian nhường CPU cho stack Wi-Fi
@@ -81,7 +89,7 @@
 #define YIELD_BUTTON_MS    100    // Thời gian chờ poll nút nhấn
 #define CONFIG_HOLD_MS     5000   // Nhấn giữ nút CONFIG để bật Rescue AP
 #define DEBOUNCE_MS        200    // Chống dội nút cứng
-#define RESET_REBOOT_MS    3000   // Nhấn giữ nút RESET để reboot
+#define RESET_SHORT_PRESS_MS 2000 // Nhấn ngắn nút RESET để toggle Rescue AP
 #define RESET_FACTORY_MS   10000  // Nhấn giữ nút RESET để factory reset
 #define RESTART_GUARD_MS   30000  // Chặn reboot lặp liên tục trong thời gian ngắn
 
@@ -98,10 +106,10 @@
 #define RAINMAKER_REPROVISION_MS 300000 // 5 phút mất mạng thì bật lại provisioning
 
 // Persistent log runtime
-#define LOG_RETENTION_SEC          259200UL  // 3 ngày
-#define LOG_FLUSH_INTERVAL_MS      120000UL  // flush tối đa mỗi 120 giây
-#define LOG_FLUSH_BATCH_COUNT      20        // flush khi có >=20 log mới
-#define LOG_PERSISTENT_MAX_BYTES   49152UL   // giới hạn ~48KB
+#define LOG_RETENTION_SEC          172800UL  // 2 ngày
+#define LOG_FLUSH_INTERVAL_MS      600000UL  // flush tối đa mỗi 10 phút
+#define LOG_FLUSH_BATCH_COUNT      12        // flush khi có >=12 log quan trọng mới
+#define LOG_PERSISTENT_MAX_BYTES    4096UL   // giới hạn 4KB để tránh đầy NVS
 
 // Mật khẩu mặc định xuất xưởng (First Boot)
 #define DEFAULT_RESCUE_AP_SSID "SmartHomebyMinh"
@@ -112,7 +120,14 @@
 #define RESET_FACTORY_HOLD_MS   10000 // 10s: Factory Reset
 
 // Cảnh báo & Tự phục hồi
-#define MIN_FREE_HEAP      20000  // Ngưỡng RAM nguy hiểm (20KB), dưới mức này tự Reboot
-#define DAILY_REBOOT_HOUR  3      // Tự động Reboot lúc 03:00 AM (nếu Idle)
+#define MIN_FREE_HEAP                  20000  // Ngưỡng RAM nguy hiểm (20KB)
+#define MIN_FREE_HEAP_RECOVERY_MARGIN  2048   // Biên độ hồi phục để reset bộ đếm heap thấp
+#define HEAP_LOW_CONSECUTIVE_LIMIT      5     // Số chu kỳ heap thấp liên tiếp trước khi yêu cầu reboot có kiểm soát
+#define HEAP_LOW_LOG_INTERVAL_MS     15000UL  // Giãn cách log cảnh báo heap thấp
+#define DAILY_REBOOT_HOUR               3     // Tự động Reboot lúc 03:00 AM (nếu Idle)
+
+// Queue lệnh điều khiển Core0 -> Core1
+#define COMMAND_QUEUE_LEN              12
+#define COMMAND_QUEUE_SEND_TIMEOUT_MS  10
 
 #endif // CONFIG_H

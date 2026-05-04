@@ -16,6 +16,7 @@
 
 #ifdef USE_RAINMAKER
 static const char *TAG = "RainMakerManager";
+extern bool wifiLowLevelInit(bool persistent);
 #endif
 
 // Do lỗi macro trùng lặp HTTP_GET/POST giữa AsyncWebServer và thư viện WebServer (của ElegantOTA),
@@ -110,7 +111,13 @@ bool parsePersistentRecord(const String& line, time_t& epochOut, String& tagOut,
   messageOut = line.substring(p3 + 1);
   return true;
 }
+
+unsigned long jitteredDelay(unsigned long baseMs, unsigned long jitterMs) {
+  if (jitterMs == 0) return baseMs;
+  return baseMs + (esp_random() % (jitterMs + 1));
 }
+}
+
 
 // ISR Handler cho nút BOOT (Phải đặt ở ngoài class)
 void IRAM_ATTR isr_config_button() {
@@ -130,14 +137,20 @@ NetworkManager::NetworkManager()
   lastWiFiCheck(0), apStartTime(0), apOfflineTime(0), wifiLostTime(0), wifiLostFlag(false),
   failedAuthCount(0), lockoutStartTime(0), isLockedOut(false), interruptConfigTriggered(false),
   interruptResetTriggered(false), configPressActive(false), configPressStart(0), lastConfigDebounce(0),
-  resetPressActive(false), resetPressStart(0), lastResetDebounce(0), claimRequired(false), webServerInitialized(false), isFirstBoot(false),
-  otaInitialized(false), lastBlynkConnectAttempt(0), blynkReconnectBackoffMs(BLYNK_RECONNECT_BASE_MS),
-  blynkRemoteGuardUntil(0), blynkWasConnected(false), blynkInvalidToken(false), logIndex(0), lastBlynkSyncLogIndex(0),
+  resetPressActive(false), resetFactoryTriggered(false), resetPressStart(0), lastResetDebounce(0), claimRequired(false), webServerInitialized(false), isFirstBoot(false),
+  otaInitialized(false), wifiReconnectBackoffMs(WIFI_TIMEOUT_MS), nextWiFiRetryAt(0),
+  lastBlynkConnectAttempt(0), blynkReconnectBackoffMs(BLYNK_RECONNECT_BASE_MS), blynkRemoteGuardUntil(0),
+  blynkWasConnected(false), blynkInvalidToken(false), cloudStateInitialized(false),
+  lastPushedPowerState(false), lastPushedLightState(false), lastPushedBlue(false), lastPushedGreen(false),
+  lastPushedRed(false), lastPushedYellow(false), lastBlynkStatePushMs(0),
+  wifiReconnectAttempts(0), blynkReconnectAttempts(0), rainmakerReprovisionAttempts(0),
+  bootResetReason(ESP_RST_UNKNOWN), lastInternetDisconnectEpoch(0), lastInternetReconnectEpoch(0), lastInternetOutageSec(0), logIndex(0), lastBlynkSyncLogIndex(0),
   persistentLogs(""), pendingPersistentLogCount(0), lastPersistentFlushMs(0), isOtaRunning(false), pendingReboot(false), rebootTime(0), lastRestartAt(0),
   resetFactoryPending(false), faultLedBlinkState(false), faultLedLastToggle(0), faultLedFlashRemainingToggles(0), faultLedFlashDeadline(0),
   ledWifiState(false), ledReadyState(false), ledFaultState(false), apManualMode(false), pendingApAction(0),
   powerOverrideActive(false), lightOverrideActive(false), scheduleStateInitialized(false), lastPowerScheduleActive(false), lastLightScheduleActive(false) {
     stringMutex = NULL;
+    stateMutex = NULL;
 #ifdef USE_RAINMAKER
     rainmakerNode = NULL;
     doorDevice = NULL;
@@ -145,6 +158,13 @@ NetworkManager::NetworkManager()
     lightDevice = NULL;
     rainmakerDoorState = "STOPPED";
     rainmakerInitialized = false;
+    rainmakerProvisioningActive = false;
+    rainmakerProvManagerInitialized = false;
+    rainmakerReprovisionBackoffMs = RAINMAKER_REPROVISION_MS;
+    nextRainmakerReprovisionAt = 0;
+    memset(rainmakerProvServiceName, 0, sizeof(rainmakerProvServiceName));
+    memset(rainmakerProvPop, 0, sizeof(rainmakerProvPop));
+    rainmakerForceResetProvisioning = false;
     wifiEventGroup = xEventGroupCreate();
 #endif
 }
@@ -195,7 +215,206 @@ String NetworkManager::formatLogWithTag(const String& message, const String& tag
             timeStr = String(buf);
         }
     }
-    return "[" + tag + "] " + timeStr + " " + message;
+
+    String output;
+    output.reserve(tag.length() + timeStr.length() + message.length() + 6);
+    output += "[";
+    output += tag;
+    output += "] ";
+    output += timeStr;
+    output += " ";
+    output += message;
+    return output;
+}
+
+bool NetworkManager::shouldPersistLog(const String& message) const {
+    if (message.startsWith("[HEALTH]")) return false;
+    if (message.startsWith("[AUTO]")) return false;
+
+    if (message.startsWith("[NET]")) return true;
+    if (message.startsWith("[BOOT]")) return true;
+    if (message.startsWith("[SYSTEM] Controlled reboot requested")) return true;
+    if (message.indexOf("Rescue AP:") >= 0) return true;
+
+    if (message.indexOf("Cua:") >= 0) return true;
+    if (message.indexOf("Nguon Box:") >= 0) return true;
+    if (message.indexOf("Den:") >= 0) return true;
+
+    return false;
+}
+
+void NetworkManager::markInternetDisconnected(unsigned long nowMs) {
+    if (wifiLostFlag) return;
+
+    wifiLostFlag = true;
+    wifiLostTime = nowMs;
+
+    time_t epoch = time(nullptr);
+    lastInternetDisconnectEpoch = (epoch >= 100000) ? epoch : 0;
+
+    String msg = "[NET] Internet disconnected";
+    if (ssid.length() > 0) {
+        msg += " (";
+        msg += ssid;
+        msg += ")";
+    }
+    logEvent(msg);
+}
+
+void NetworkManager::markInternetConnected(unsigned long nowMs) {
+    if (!wifiLostFlag) return;
+
+    uint32_t outageSec = static_cast<uint32_t>((nowMs - wifiLostTime) / 1000UL);
+    wifiLostFlag = false;
+    wifiLostTime = 0;
+    lastInternetOutageSec = outageSec;
+
+    time_t epoch = time(nullptr);
+    lastInternetReconnectEpoch = (epoch >= 100000) ? epoch : 0;
+
+    String msg;
+    msg.reserve(96);
+    msg = "[NET] Internet connected after ";
+    msg += String(outageSec);
+    msg += "s";
+    if (WiFi.localIP()) {
+        msg += ", IP=";
+        msg += WiFi.localIP().toString();
+    }
+    logEvent(msg);
+}
+
+void NetworkManager::loadPersistentLogs() {
+    String loaded;
+    Preferences logPrefs;
+    if (logPrefs.begin("mydoor_logs", false)) {
+        if (logPrefs.isKey("blob")) {
+            loaded = logPrefs.getString("blob", "");
+        }
+        logPrefs.end();
+    }
+
+    pruneLogsOlderThan3Days(loaded);
+
+    while (loaded.length() > LOG_PERSISTENT_MAX_BYTES) {
+        int firstNewline = loaded.indexOf('\n');
+        if (firstNewline < 0) {
+            loaded = "";
+            break;
+        }
+        loaded.remove(0, firstNewline + 1);
+    }
+
+    if (xSemaphoreTake(stringMutex, pdMS_TO_TICKS(150))) {
+        persistentLogs = loaded;
+        pendingPersistentLogCount = 0;
+        xSemaphoreGive(stringMutex);
+    } else {
+        persistentLogs = loaded;
+        pendingPersistentLogCount = 0;
+    }
+
+    rebuildRuntimeLogsFromPersistent();
+}
+
+void NetworkManager::appendPersistentLogLine(time_t epoch, const String& tag, const String& message) {
+    if (epoch <= 0) {
+        return;
+    }
+
+    String safeTag = normalizeLogField(tag);
+    if (safeTag.length() == 0) {
+        safeTag = "INFO";
+    }
+
+    String safeMessage = normalizeLogField(message);
+
+    String record;
+    record.reserve(safeTag.length() + safeMessage.length() + 24);
+    record += String(static_cast<unsigned long>(epoch));
+    record += "|0|";
+    record += safeTag;
+    record += "|";
+    record += safeMessage;
+    record += "\n";
+
+    if (xSemaphoreTake(stringMutex, pdMS_TO_TICKS(150))) {
+        persistentLogs += record;
+        pendingPersistentLogCount++;
+        xSemaphoreGive(stringMutex);
+    } else {
+        persistentLogs += record;
+        pendingPersistentLogCount++;
+    }
+}
+
+void NetworkManager::flushLogsToNvsIfNeeded(bool force) {
+    unsigned long now = millis();
+
+    uint16_t pendingCount = pendingPersistentLogCount;
+    if (!force) {
+        if (pendingCount == 0) return;
+        if (pendingCount < LOG_FLUSH_BATCH_COUNT && (now - lastPersistentFlushMs) < LOG_FLUSH_INTERVAL_MS) {
+            return;
+        }
+    }
+
+    String snapshot;
+    if (!xSemaphoreTake(stringMutex, pdMS_TO_TICKS(200))) {
+        return;
+    }
+
+    snapshot = persistentLogs;
+    pruneLogsOlderThan3Days(snapshot);
+
+    while (snapshot.length() > LOG_PERSISTENT_MAX_BYTES) {
+        int firstNewline = snapshot.indexOf('\n');
+        if (firstNewline < 0) {
+            snapshot = "";
+            break;
+        }
+        snapshot.remove(0, firstNewline + 1);
+    }
+
+    persistentLogs = snapshot;
+    pendingPersistentLogCount = 0;
+    xSemaphoreGive(stringMutex);
+
+    Preferences logPrefs;
+    if (logPrefs.begin("mydoor_logs", false)) {
+        logPrefs.putString("blob", snapshot);
+        logPrefs.end();
+    }
+
+    lastPersistentFlushMs = now;
+}
+
+void NetworkManager::logEvent(const String& message) {
+    Serial.println(message);
+
+    time_t epoch = time(nullptr);
+    if (epoch < 100000) {
+        epoch = 0;
+    }
+
+    String tag = detectLogTag(message);
+    String display = formatLogWithTag(message, tag, epoch);
+
+    if (xSemaphoreTake(stringMutex, pdMS_TO_TICKS(150))) {
+        eventLogs[logIndex] = display;
+        logIndex = (logIndex + 1) % 15;
+        if (logIndex == lastBlynkSyncLogIndex) {
+            lastBlynkSyncLogIndex = (lastBlynkSyncLogIndex + 1) % 15;
+        }
+
+        xSemaphoreGive(stringMutex);
+    } else {
+        Serial.println("[MUTEX] Timeout logging event");
+    }
+
+    if (shouldPersistLog(message)) {
+        appendPersistentLogLine(epoch, tag, message);
+    }
 }
 
 void NetworkManager::pruneLogsOlderThan3Days(String& blob) const {
@@ -260,97 +479,45 @@ void NetworkManager::rebuildRuntimeLogsFromPersistent() {
     lastBlynkSyncLogIndex = logIndex;
 }
 
-void NetworkManager::loadPersistentLogs() {
-    Preferences p;
-    p.begin("mydoor_logs", true);
-    persistentLogs = p.getString("lines", "");
-    p.end();
-
-    pruneLogsOlderThan3Days(persistentLogs);
-
-    while (persistentLogs.length() > static_cast<int>(LOG_PERSISTENT_MAX_BYTES)) {
-        int firstNewLine = persistentLogs.indexOf('\n');
-        if (firstNewLine < 0) {
-            persistentLogs = "";
-            break;
-        }
-        persistentLogs = persistentLogs.substring(firstNewLine + 1);
-    }
-
-    rebuildRuntimeLogsFromPersistent();
-}
-
-void NetworkManager::appendPersistentLogLine(time_t epoch, const String& tag, const String& message) {
-    String normalizedTag = normalizeLogField(tag);
-    String normalizedMsg = normalizeLogField(message);
-    String line = String(static_cast<unsigned long>(epoch > 0 ? epoch : 0)) + "|INFO|" + normalizedTag + "|" + normalizedMsg;
-
-    persistentLogs += line;
-    persistentLogs += "\n";
-    pendingPersistentLogCount++;
-
-    pruneLogsOlderThan3Days(persistentLogs);
-
-    while (persistentLogs.length() > static_cast<int>(LOG_PERSISTENT_MAX_BYTES)) {
-        int firstNewLine = persistentLogs.indexOf('\n');
-        if (firstNewLine < 0) {
-            persistentLogs = "";
-            break;
-        }
-        persistentLogs = persistentLogs.substring(firstNewLine + 1);
-    }
-}
-
-void NetworkManager::flushLogsToNvsIfNeeded(bool force) {
-    unsigned long now = millis();
-    bool shouldFlush = force || pendingPersistentLogCount >= LOG_FLUSH_BATCH_COUNT || (pendingPersistentLogCount > 0 && (now - lastPersistentFlushMs >= LOG_FLUSH_INTERVAL_MS));
-    if (!shouldFlush) return;
-
-    String snapshot;
-    if (!xSemaphoreTake(stringMutex, pdMS_TO_TICKS(150))) {
-        return;
-    }
-    snapshot = persistentLogs;
-    pendingPersistentLogCount = 0;
-    lastPersistentFlushMs = now;
-    xSemaphoreGive(stringMutex);
-
-    Preferences p;
-    p.begin("mydoor_logs", false);
-    p.putString("lines", snapshot);
-    p.end();
-}
-
-void NetworkManager::logEvent(const String& message) {
-    Serial.println(message);
-
-    time_t epoch = time(nullptr);
-    if (epoch < 100000) {
-        epoch = 0;
-    }
-
-    String tag = detectLogTag(message);
-    String display = formatLogWithTag(message, tag, epoch);
-
-    if (xSemaphoreTake(stringMutex, pdMS_TO_TICKS(150))) {
-        eventLogs[logIndex] = display;
-        logIndex = (logIndex + 1) % 15;
-        if (logIndex == lastBlynkSyncLogIndex) {
-            lastBlynkSyncLogIndex = (lastBlynkSyncLogIndex + 1) % 15;
-        }
-
-        appendPersistentLogLine(epoch, tag, message);
-        xSemaphoreGive(stringMutex);
-    } else {
-        Serial.println("[MUTEX] Timeout logging event");
-    }
+String NetworkManager::getHealthSnapshot() const {
+    String json;
+    json.reserve(420);
+    json = "{\"heap_now\":";
+    json += String(controlLogic.getCurrentFreeHeap());
+    json += ",\"heap_min\":";
+    json += String(controlLogic.getMinObservedHeap());
+    json += ",\"queue_drop\":";
+    json += String(controlLogic.getQueueDropCount());
+    json += ",\"queue_peak\":";
+    json += String(controlLogic.getMaxObservedQueueDepth());
+    json += ",\"wifi_reconnect\":";
+    json += String(wifiReconnectAttempts);
+    json += ",\"blynk_reconnect\":";
+    json += String(blynkReconnectAttempts);
+    json += ",\"rm_reprovision\":";
+    json += String(rainmakerReprovisionAttempts);
+    json += ",\"is_connected\":";
+    json += (isConnected ? "true" : "false");
+    json += ",\"is_ap_mode\":";
+    json += (isApMode ? "true" : "false");
+    json += ",\"reset_reason_code\":";
+    json += String(static_cast<int>(bootResetReason));
+    json += ",\"last_disconnect_epoch\":";
+    json += String(static_cast<unsigned long>(lastInternetDisconnectEpoch > 0 ? lastInternetDisconnectEpoch : 0));
+    json += ",\"last_reconnect_epoch\":";
+    json += String(static_cast<unsigned long>(lastInternetReconnectEpoch > 0 ? lastInternetReconnectEpoch : 0));
+    json += ",\"last_outage_sec\":";
+    json += String(lastInternetOutageSec);
+    json += "}";
+    return json;
 }
 
 void NetworkManager::syncLogsToCloud() {
     if (lastBlynkSyncLogIndex == logIndex) return;
 
     if (xSemaphoreTake(stringMutex, pdMS_TO_TICKS(100))) {
-        while (lastBlynkSyncLogIndex != logIndex) {
+        int sent = 0;
+        while (lastBlynkSyncLogIndex != logIndex && sent < LOG_SYNC_BATCH_PER_LOOP) {
             String logLine = eventLogs[lastBlynkSyncLogIndex];
 #ifdef USE_BLYNK
             if (Blynk.connected()) {
@@ -358,6 +525,7 @@ void NetworkManager::syncLogsToCloud() {
             }
 #endif
             lastBlynkSyncLogIndex = (lastBlynkSyncLogIndex + 1) % 15;
+            sent++;
         }
         xSemaphoreGive(stringMutex);
     }
@@ -396,11 +564,21 @@ String NetworkManager::renderPersistentLogsForClient() const {
 }
 
 String NetworkManager::getRecentLogs() const {
-    return renderPersistentLogsForClient();
+    String logs = "";
+    if (xSemaphoreTake(stringMutex, pdMS_TO_TICKS(100))) {
+        for (int i = 0; i < 15; ++i) {
+            int idx = (logIndex + i) % 15;
+            if (eventLogs[idx].length() > 0) {
+                logs += eventLogs[idx] + "\n";
+            }
+        }
+        xSemaphoreGive(stringMutex);
+    }
+    return logs;
 }
 
 String NetworkManager::getPublicLogs() const {
-    return renderPersistentLogsForClient();
+    return getRecentLogs();
 }
 
 void NetworkManager::replayLogsToBlynk() {
@@ -445,6 +623,21 @@ void NetworkManager::begin() {
   if (stringMutex == NULL) {
       stringMutex = xSemaphoreCreateMutex();
   }
+  if (stateMutex == NULL) {
+      stateMutex = xSemaphoreCreateMutex();
+  }
+
+#ifdef USE_RAINMAKER
+  esp_err_t ret = nvs_flash_init();
+  if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+      ESP_ERROR_CHECK(nvs_flash_erase());
+      ret = nvs_flash_init();
+  }
+  ESP_ERROR_CHECK(ret);
+#endif
+
+  bootResetReason = esp_reset_reason();
+  logEvent(String("[BOOT] Reset reason code: ") + String(static_cast<int>(bootResetReason)));
 
   lastPersistentFlushMs = millis();
   loadPersistentLogs();
@@ -457,24 +650,18 @@ void NetworkManager::begin() {
   loadConfig();
 
 #ifdef USE_RAINMAKER
-  esp_err_t ret = nvs_flash_init();
-  if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-      ESP_ERROR_CHECK(nvs_flash_erase());
-      ret = nvs_flash_init();
-  }
-  ESP_ERROR_CHECK(ret);
-
-  ESP_ERROR_CHECK(esp_event_loop_create_default());
-  ESP_ERROR_CHECK(esp_netif_init());
-  wifi_init_config_t wifi_init_cfg = WIFI_INIT_CONFIG_DEFAULT();
-  ESP_ERROR_CHECK(esp_wifi_init(&wifi_init_cfg));
-
-  ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
-  ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL));
-  ESP_ERROR_CHECK(esp_event_handler_register(RMAKER_EVENT, ESP_EVENT_ANY_ID, &rainmaker_event_handler, NULL));
+  WiFi.mode(WIFI_STA);
+  esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL);
+  esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL);
+  esp_event_handler_register(RMAKER_EVENT, ESP_EVENT_ANY_ID, &rainmaker_event_handler, NULL);
+  esp_event_handler_register(WIFI_PROV_EVENT, ESP_EVENT_ANY_ID, &provisioning_event_handler, NULL);
 
   setupRainMaker();
-  startRainMakerProvisioning();
+  if (rainmakerInitialized) {
+      startRainMakerProvisioning();
+  } else {
+      logEvent("[RM] Init failed, provisioning skipped.");
+  }
 #endif
 
 #ifndef USE_RAINMAKER
@@ -493,45 +680,81 @@ void NetworkManager::begin() {
 }
 
 void NetworkManager::loadConfig() {
-  preferences.begin("mydoor", false); // Két sắt NVS tên "mydoor"
-
   deviceId = buildDeviceId();
-  if (preferences.getString("device_id", "") == "") {
+
+  if (!preferences.begin("mydoor", false)) {
+    ssid = "";
+    password = "";
+    ssid2 = "";
+    pass2 = "";
+    adminUser = "";
+    adminPass = "";
+    blynkTemplate = "";
+    blynkName = "";
+    blynkAuth = "";
+    rescueApSsid = DEFAULT_RESCUE_AP_SSID;
+    rescueApPass = DEFAULT_RESCUE_AP_PASS;
+    timezone = 7;
+    onHour = 6;
+    onMin = 0;
+    offHour = 23;
+    offMin = 0;
+    scheduleDays = 127;
+    lightOnHour = 18;
+    lightOnMin = 0;
+    lightOffHour = 5;
+    lightOffMin = 0;
+    lightScheduleDays = 127;
+    powerOverrideActive = false;
+    lightOverrideActive = false;
+    claimRequired = true;
+    isFirstBoot = true;
+
+    Serial.println("[NVS] Khong mo duoc namespace 'mydoor'. Dung cau hinh mac dinh va cho claim lai.");
+    return;
+  }
+
+  auto getOptString = [this](const char* key) -> String {
+    return preferences.isKey(key) ? preferences.getString(key, "") : "";
+  };
+
+  if (!preferences.isKey("device_id")) {
     preferences.putString("device_id", deviceId);
   }
 
-  ssid = preferences.getString("ssid", "");
-  password = preferences.getString("pass", "");
-  ssid2 = preferences.getString("ssid2", "");
-  pass2 = preferences.getString("pass2", "");
+  ssid = getOptString("ssid");
+  password = getOptString("pass");
+  ssid2 = getOptString("ssid2");
+  pass2 = getOptString("pass2");
 
-  adminUser = preferences.getString("admin_user", "");
-  adminPass = preferences.getString("admin_pass", "");
+  adminUser = getOptString("admin_user");
+  adminPass = getOptString("admin_pass");
 
-  blynkTemplate = preferences.getString("blynkTemplate", "");
-  blynkName = preferences.getString("blynkName", "");
-  blynkAuth = preferences.getString("blynkAuth", "");
+  blynkTemplate = getOptString("blynkTemplate");
+  blynkName = getOptString("blynkName");
+  blynkAuth = getOptString("blynkAuth");
 
-  rescueApSsid = preferences.getString("rescue_ssid", "");
-  rescueApPass = preferences.getString("rescue_pass", "");
-  bool rescueCustomized = preferences.getBool("rescue_customized", false);
+  rescueApSsid = getOptString("rescue_ssid");
+  rescueApPass = getOptString("rescue_pass");
+  bool rescueCustomized = preferences.getBool("rescue_custom", false);
 
-  timezone = preferences.getChar("timezone", 7); // Mặc định UTC+7
-  onHour = preferences.getUChar("onHour", 6); // Mặc định bật 6h sáng
+  timezone = preferences.getChar("timezone", 7);
+  onHour = preferences.getUChar("onHour", 6);
   onMin = preferences.getUChar("onMin", 0);
-  offHour = preferences.getUChar("offHour", 23); // Tắt 23h đêm
+  offHour = preferences.getUChar("offHour", 23);
   offMin = preferences.getUChar("offMin", 0);
-  scheduleDays = preferences.getUChar("days", 127); // Mặc định cả tuần (1111111 = 127)
+  scheduleDays = preferences.getUChar("days", 127);
 
-  lightOnHour = preferences.getUChar("l_onHour", 18); // Đèn bật 18h tối
+  lightOnHour = preferences.getUChar("l_onHour", 18);
   lightOnMin = preferences.getUChar("l_onMin", 0);
-  lightOffHour = preferences.getUChar("l_offHour", 5); // Đèn tắt 5h sáng
+  lightOffHour = preferences.getUChar("l_offHour", 5);
   lightOffMin = preferences.getUChar("l_offMin", 0);
   lightScheduleDays = preferences.getUChar("lightScheduleDays", 127);
 
-  // Xử lý cờ First Boot và tương thích ngược
+  powerOverrideActive = preferences.getBool("power_override", false);
+  lightOverrideActive = preferences.getBool("light_override", false);
+
   if (ssid == "") {
-      // Máy mới tinh hoặc đã factory reset (chưa có Wi-Fi)
       if (adminUser == "" || adminPass == "") {
           isFirstBoot = true;
           Serial.println("[SECURITY] Thiet bi moi: Yeu cau tao tai khoan Admin!");
@@ -539,17 +762,12 @@ void NetworkManager::loadConfig() {
           isFirstBoot = false;
       }
   } else {
-      // Máy đã có Wi-Fi (nâng cấp từ bản cũ)
       if (adminUser == "" || adminPass == "") {
           Serial.println("[SECURITY] Phat hien Firmware cu nang cap chua co Admin. Se yeu cau claim lai.");
       }
-      isFirstBoot = false; // Đã có Wi-Fi thì không bao giờ là First Boot
+      isFirstBoot = false;
   }
 
-  String persistedAdminUser = preferences.getString("admin_user", "");
-  String persistedAdminPass = preferences.getString("admin_pass", "");
-  adminUser = persistedAdminUser;
-  adminPass = persistedAdminPass;
   claimRequired = (adminUser == "" || adminPass == "");
   isFirstBoot = claimRequired;
 
@@ -563,7 +781,7 @@ void NetworkManager::loadConfig() {
     rescueApPass = DEFAULT_RESCUE_AP_PASS;
     preferences.putString("rescue_ssid", rescueApSsid);
     preferences.putString("rescue_pass", rescueApPass);
-    preferences.putBool("rescue_customized", false);
+    preferences.putBool("rescue_custom", false);
   } else {
     if (rescueSsidEmpty) {
       rescueApSsid = DEFAULT_RESCUE_AP_SSID;
@@ -576,7 +794,7 @@ void NetworkManager::loadConfig() {
   }
 
   if (rescueCustomized && rescueSsidEmpty) {
-    preferences.putBool("rescue_customized", false);
+    preferences.putBool("rescue_custom", false);
   }
 
   preferences.end();
@@ -608,7 +826,7 @@ void NetworkManager::setupAP() {
   WiFi.softAPConfig(local_ip, gateway, subnet);
 
   WiFi.softAP(rescueApSsid.c_str(), rescueApPass.c_str(), 1, 0);
-  Serial.printf("[AP] Rescue AP dang hoat dong. SSID: %s, PASS: %s, IP: 10.10.10.1\n", rescueApSsid.c_str(), rescueApPass.c_str());
+  Serial.printf("[AP] Rescue AP dang hoat dong. SSID: %s, PASS: [HIDDEN], IP: 10.10.10.1\n", rescueApSsid.c_str());
 
   if (ssid != "") {
       WiFi.begin(ssid.c_str(), password.c_str());
@@ -619,8 +837,6 @@ void NetworkManager::setupAP() {
 }
 
 void NetworkManager::enableRescueAp(const char* reason) {
-  isLockedOut = false;
-  failedAuthCount = 0;
   if (reason != nullptr && reason[0] != '\0') {
       Serial.printf("[AP] Bat Rescue AP: %s\n", reason);
   }
@@ -664,31 +880,57 @@ void NetworkManager::toggleRescueAp(const char* reason) {
 }
 
 void NetworkManager::requestApEnable(bool manualMode, const char* reason) {
-  apManualMode = manualMode;
+  if (stateMutex != NULL && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50))) {
+      apManualMode = manualMode;
+      pendingApAction = 1;
+      xSemaphoreGive(stateMutex);
+  } else {
+      apManualMode = manualMode;
+      pendingApAction = 1;
+  }
+
   if (reason != nullptr && reason[0] != '\0') {
       Serial.printf("[AP] Queue bat AP: %s\n", reason);
   }
-  pendingApAction = 1;
 }
 
 void NetworkManager::requestApDisable(const char* reason) {
+  if (stateMutex != NULL && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50))) {
+      pendingApAction = 2;
+      xSemaphoreGive(stateMutex);
+  } else {
+      pendingApAction = 2;
+  }
+
   if (reason != nullptr && reason[0] != '\0') {
       Serial.printf("[AP] Queue tat AP: %s\n", reason);
   }
-  pendingApAction = 2;
 }
 
 void NetworkManager::processPendingApAction() {
-  if (pendingApAction == 1) {
-      enableRescueAp("Queued AP ON");
+  uint8_t action = 0;
+  if (stateMutex != NULL && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50))) {
+      action = pendingApAction;
       pendingApAction = 0;
+      xSemaphoreGive(stateMutex);
+  } else {
+      action = pendingApAction;
+      pendingApAction = 0;
+  }
+
+  if (action == 1) {
+      enableRescueAp("Queued AP ON");
       return;
   }
 
-  if (pendingApAction == 2) {
+  if (action == 2) {
       disableRescueAp("Queued AP OFF");
-      apManualMode = false;
-      pendingApAction = 0;
+      if (stateMutex != NULL && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50))) {
+          apManualMode = false;
+          xSemaphoreGive(stateMutex);
+      } else {
+          apManualMode = false;
+      }
   }
 }
 
@@ -739,9 +981,10 @@ void NetworkManager::handleResetButton() {
 
   if (interruptResetTriggered) {
       interruptResetTriggered = false;
-      if (now - lastResetDebounce >= DEBOUNCE_MS) {
+      if (!resetPressActive && now - lastResetDebounce >= DEBOUNCE_MS) {
           lastResetDebounce = now;
           resetPressActive = true;
+          resetFactoryTriggered = false;
           resetPressStart = now;
       }
   }
@@ -750,42 +993,44 @@ void NetworkManager::handleResetButton() {
       return;
   }
 
-  if (digitalRead(PIN_BTN_RESET) == LOW) {
+  bool pressed = (digitalRead(PIN_BTN_RESET) == LOW);
+
+  if (pressed) {
+      unsigned long holdMs = now - resetPressStart;
+      if (!resetFactoryTriggered && holdMs >= RESET_FACTORY_MS) {
+          resetFactoryTriggered = true;
+          resetPressActive = false;
+          Serial.println("\n[FACTORY RESET] Dang xoa toan bo cau hinh...");
+          flushLogsToNvsIfNeeded(true);
+          Preferences p;
+          p.begin("mydoor", false); p.clear(); p.end();
+          p.begin("mydoor_state", false); p.clear(); p.end();
+          Serial.println("[FACTORY RESET] Hoan tat. Dang khoi dong lai he thong...");
+          resetFactoryPending = true;
+          startFaultLedFlash(3);
+          requestControlledReboot("Factory reset hold >=10s");
+      }
       return;
   }
 
   unsigned long holdMs = now - resetPressStart;
   resetPressActive = false;
 
-  if (holdMs >= RESET_FACTORY_MS) {
-      Serial.println("\n[FACTORY RESET] Dang xoa toan bo cau hinh...");
-      flushLogsToNvsIfNeeded(true);
-      Preferences p;
-      p.begin("mydoor", false); p.clear(); p.end();
-      p.begin("mydoor_state", false); p.clear(); p.end();
-      Serial.println("[FACTORY RESET] Hoan tat. Dang khoi dong lai he thong...");
-      resetFactoryPending = true;
-      startFaultLedFlash(3);
-      pendingReboot = true;
-      rebootTime = now;
+  if (resetFactoryTriggered) {
       return;
   }
 
-  if (holdMs >= RESET_REBOOT_MS) {
-      Serial.println("\n[REBOOT] Lenh Reboot tu nut bam cung.");
-      flushLogsToNvsIfNeeded(true);
-      resetFactoryPending = false;
-      startFaultLedFlash(1);
-      pendingReboot = true;
-      rebootTime = now;
+  if (holdMs >= RESET_SHORT_PRESS_MS) {
+      Serial.printf("[RESET BTN] Hold %lums ignored (short < %dms, factory >= %dms).\n", holdMs, RESET_SHORT_PRESS_MS, RESET_FACTORY_MS);
       return;
   }
 
+  startFaultLedFlash(1);
   if (isApMode) {
-      requestApDisable("GPIO2 short press");
+      requestApDisable("GPIO21 short press");
       apManualMode = false;
   } else {
-      requestApEnable(true, "GPIO2 short press");
+      requestApEnable(true, "GPIO21 short press");
   }
 }
 
@@ -869,16 +1114,97 @@ void NetworkManager::setupRainMaker() {
 }
 
 void NetworkManager::startRainMakerProvisioning() {
-    ESP_ERROR_CHECK(esp_wifi_start());
+    if (!rainmakerInitialized) {
+        ESP_LOGW(TAG, "RainMaker not initialized. Skip provisioning start.");
+        return;
+    }
+
+    if (rainmakerProvisioningActive) {
+        ESP_LOGW(TAG, "Provisioning already active, skip restart.");
+        return;
+    }
+
+    if (rainmakerProvServiceName[0] == '\0') {
+        const char* id = deviceId.length() > 6 ? deviceId.c_str() + (deviceId.length() - 6) : deviceId.c_str();
+        snprintf(rainmakerProvServiceName, sizeof(rainmakerProvServiceName), "MYDOOR_%s", id);
+    }
+
+    if (rainmakerProvPop[0] == '\0') {
+        snprintf(rainmakerProvPop, sizeof(rainmakerProvPop), "%s", deviceId.c_str());
+    }
+
+    if (!wifiLowLevelInit(true)) {
+        ESP_LOGE(TAG, "wifiLowLevelInit failed before provisioning start.");
+        return;
+    }
+
+    if (!rainmakerProvManagerInitialized) {
+        wifi_prov_mgr_config_t config = {};
+        config.scheme = wifi_prov_scheme_softap;
+        config.scheme_event_handler = WIFI_PROV_EVENT_HANDLER_NONE;
+        config.app_event_handler.event_cb = nullptr;
+        config.app_event_handler.user_data = nullptr;
+
+        esp_err_t initErr = wifi_prov_mgr_init(config);
+        if (initErr != ESP_OK) {
+            ESP_LOGE(TAG, "wifi_prov_mgr_init failed: %s (%d)", esp_err_to_name(initErr), static_cast<int>(initErr));
+            return;
+        }
+        rainmakerProvManagerInitialized = true;
+        ESP_LOGI(TAG, "Provisioning manager initialized (BLE).");
+    }
+
+    if (rainmakerForceResetProvisioning) {
+        esp_err_t resetErr = wifi_prov_mgr_reset_provisioning();
+        if (resetErr != ESP_OK) {
+            ESP_LOGW(TAG, "wifi_prov_mgr_reset_provisioning failed: %s (%d)", esp_err_to_name(resetErr), static_cast<int>(resetErr));
+        }
+    }
+
+    bool provisioned = false;
+    esp_err_t provCheckErr = wifi_prov_mgr_is_provisioned(&provisioned);
+    if (provCheckErr != ESP_OK) {
+        ESP_LOGE(TAG, "wifi_prov_mgr_is_provisioned failed: %s (%d)", esp_err_to_name(provCheckErr), static_cast<int>(provCheckErr));
+        return;
+    }
+
+    if (provisioned && !rainmakerForceResetProvisioning) {
+        rainmakerForceResetProvisioning = false;
+        ESP_LOGI(TAG, "Already provisioned. Skip provisioning start.");
+        return;
+    }
+
+    esp_err_t startErr = wifi_prov_mgr_start_provisioning(
+        WIFI_PROV_SECURITY_1,
+        rainmakerProvPop,
+        rainmakerProvServiceName,
+        "12345678"
+    );
+
+    if (startErr != ESP_OK) {
+        ESP_LOGE(TAG, "wifi_prov_mgr_start_provisioning failed: %s (%d)", esp_err_to_name(startErr), static_cast<int>(startErr));
+        return;
+    }
+
+    rainmakerProvisioningActive = true;
+    rainmakerForceResetProvisioning = false;
     wifiLostFlag = false;
     wifiLostTime = 0;
-    ESP_LOGI(TAG, "RainMaker provisioning flow started.");
+    ESP_LOGI(TAG, "RainMaker SoftAP provisioning start requested. service=%s pop=%s", rainmakerProvServiceName, rainmakerProvPop);
 }
 
 void NetworkManager::stopRainMakerProvisioning() {
+    if (!rainmakerInitialized) {
+        return;
+    }
+
+    if (rainmakerProvManagerInitialized && rainmakerProvisioningActive) {
+        wifi_prov_mgr_stop_provisioning();
+        ESP_LOGI(TAG, "RainMaker provisioning stop requested.");
+    }
+
     wifiLostFlag = false;
     wifiLostTime = 0;
-    ESP_LOGI(TAG, "RainMaker provisioning stop requested.");
 }
 
 void NetworkManager::pushRainMakerState() {
@@ -918,17 +1244,11 @@ esp_err_t NetworkManager::write_cb_wrapper(const esp_rmaker_device_t *device, co
     } else if (device_id == 0x00) {
         const char* param_name = esp_rmaker_param_get_name(param);
         if (strcmp(param_name, "up") == 0 && val.val.b) {
-            netManager.rainmakerDoorState = "UP";
-            controlLogic.executeRemoteCommand(CMD_UP);
-            netManager.logEvent("Door: UP (RainMaker)");
+            netManager.handleRemoteDoorCommand(CMD_UP, "RainMaker");
         } else if (strcmp(param_name, "down") == 0 && val.val.b) {
-            netManager.rainmakerDoorState = "DOWN";
-            controlLogic.executeRemoteCommand(CMD_DOWN);
-            netManager.logEvent("Door: DOWN (RainMaker)");
+            netManager.handleRemoteDoorCommand(CMD_DOWN, "RainMaker");
         } else if (strcmp(param_name, "stop") == 0 && val.val.b) {
-            netManager.rainmakerDoorState = "STOPPED";
-            controlLogic.executeRemoteCommand(CMD_STOP);
-            netManager.logEvent("Door: STOP (RainMaker)");
+            netManager.handleRemoteDoorCommand(CMD_STOP, "RainMaker");
         }
         esp_rmaker_param_update_and_report((esp_rmaker_param_t *)param, esp_rmaker_bool(false));
     }
@@ -958,17 +1278,61 @@ void NetworkManager::rainmaker_event_handler(void* arg, esp_event_base_t event_b
     }
 }
 
+void NetworkManager::provisioning_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    (void)arg;
+    (void)event_base;
+
+    switch (event_id) {
+        case WIFI_PROV_START:
+            netManager.rainmakerProvisioningActive = true;
+            netManager.logEvent("[RM] SoftAP provisioning started.");
+            WiFiProv.printQR(netManager.rainmakerProvServiceName, netManager.rainmakerProvPop, "softap");
+            netManager.logEvent("[RM] Scan QR in ESP RainMaker app (Self/Manual claiming).");
+            break;
+        case WIFI_PROV_CRED_RECV:
+            netManager.logEvent("[RM] WiFi credentials received from provisioning app.");
+            break;
+        case WIFI_PROV_CRED_SUCCESS:
+            netManager.logEvent("[RM] Provisioning credentials accepted.");
+            break;
+        case WIFI_PROV_CRED_FAIL: {
+            wifi_prov_sta_fail_reason_t* reason = static_cast<wifi_prov_sta_fail_reason_t*>(event_data);
+            if (reason && *reason == WIFI_PROV_STA_AUTH_ERROR) {
+                netManager.logEvent("[RM] Provisioning failed: WiFi auth error.");
+            } else if (reason && *reason == WIFI_PROV_STA_AP_NOT_FOUND) {
+                netManager.logEvent("[RM] Provisioning failed: WiFi AP not found.");
+            } else {
+                netManager.logEvent("[RM] Provisioning failed: unknown station reason.");
+            }
+            break;
+        }
+        case WIFI_PROV_END:
+            netManager.rainmakerProvisioningActive = false;
+            if (netManager.rainmakerProvManagerInitialized) {
+                wifi_prov_mgr_deinit();
+                netManager.rainmakerProvManagerInitialized = false;
+                ESP_LOGI(TAG, "Provisioning manager deinitialized.");
+            }
+            netManager.logEvent("[RM] Provisioning service stopped.");
+            break;
+        default:
+            break;
+    }
+}
+
 void NetworkManager::wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     if (event_base == WIFI_EVENT) {
         if (event_id == WIFI_EVENT_STA_START) {
+            if (!netManager.rainmakerInitialized) {
+                return;
+            }
             esp_wifi_connect();
         } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
             ESP_LOGI(TAG, "Wi-Fi Disconnected. Retrying...");
             xEventGroupClearBits(netManager.wifiEventGroup, WIFI_CONNECTED_BIT);
             netManager.isConnected = false;
             if (!netManager.wifiLostFlag) {
-                netManager.wifiLostFlag = true;
-                netManager.wifiLostTime = millis();
+                netManager.markInternetDisconnected(millis());
                 netManager.logEvent("[RM] WiFi lost, start long-loss timer.");
             }
             esp_wifi_connect();
@@ -979,6 +1343,7 @@ void NetworkManager::wifi_event_handler(void* arg, esp_event_base_t event_base, 
             ESP_LOGI(TAG, "Wi-Fi Connected. IP: " IPSTR, IP2STR(&event->ip_info.ip));
             xEventGroupSetBits(netManager.wifiEventGroup, WIFI_CONNECTED_BIT);
             netManager.isConnected = true;
+            netManager.markInternetConnected(millis());
             netManager.stopRainMakerProvisioning();
             netManager.logEvent("[RM] WiFi recovered, provisioning stopped.");
         }
@@ -1025,6 +1390,39 @@ void NetworkManager::syncOtaAuth() {
         ElegantOTA.setAuth(adminUser.c_str(), adminPass.c_str());
         Serial.println("[SECURITY] ElegantOTA da dong bo Admin credential moi.");
     }
+}
+
+bool NetworkManager::requestControlledReboot(const char* reason) {
+  if (isOtaRunning) {
+      logEvent("[SYSTEM] Reboot blocked while OTA is running.");
+      return false;
+  }
+
+  bool scheduled = false;
+  if (stateMutex != NULL && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100))) {
+      if (!pendingReboot) {
+          pendingReboot = true;
+          rebootTime = millis();
+          scheduled = true;
+      }
+      xSemaphoreGive(stateMutex);
+  } else if (!pendingReboot) {
+      pendingReboot = true;
+      rebootTime = millis();
+      scheduled = true;
+  }
+
+  if (!scheduled) {
+      return false;
+  }
+
+  if (reason != nullptr && reason[0] != '\0') {
+      logEvent(String("[SYSTEM] Controlled reboot requested: ") + reason);
+  } else {
+      logEvent("[SYSTEM] Controlled reboot requested.");
+  }
+
+  return true;
 }
 
 void NetworkManager::setupWebServer() {
@@ -1078,10 +1476,16 @@ void NetworkManager::setupWebServer() {
     if (!netManager.checkAuth(request)) return;
 
     int n = WiFi.scanNetworks();
-    String json = "[";
+    String json;
+    json.reserve(32 + (n > 0 ? n : 1) * 48);
+    json = "[";
     for (int i = 0; i < n; ++i) {
       if (i > 0) json += ",";
-      json += "{\"ssid\":\"" + WiFi.SSID(i) + "\",\"rssi\":" + String(WiFi.RSSI(i)) + "}";
+      json += "{\"ssid\":\"";
+      json += WiFi.SSID(i);
+      json += "\",\"rssi\":";
+      json += String(WiFi.RSSI(i));
+      json += "}";
     }
     json += "]";
     request->send(200, "application/json", json);
@@ -1091,75 +1495,211 @@ void NetworkManager::setupWebServer() {
   server.on("/get_config", ASYNC_GET, [](AsyncWebServerRequest *request){
     if (!netManager.checkAuth(request)) return;
 
-    String json = "{\"timezone\":" + String(netManager.timezone) +
-                  ",\"onHour\":" + String(netManager.onHour) +
-                  ",\"onMin\":" + String(netManager.onMin) +
-                  ",\"offHour\":" + String(netManager.offHour) +
-                  ",\"offMin\":" + String(netManager.offMin) +
-                  ",\"days\":" + String(netManager.scheduleDays) +
-                  ",\"l_onHour\":" + String(netManager.lightOnHour) +
-                  ",\"l_onMin\":" + String(netManager.lightOnMin) +
-                  ",\"l_offHour\":" + String(netManager.lightOffHour) +
-                  ",\"l_offMin\":" + String(netManager.lightOffMin) +
-                  ",\"lightScheduleDays\":" + String(netManager.lightScheduleDays) +
-                  ",\"device_id\":\"" + netManager.deviceId + "\"" +
-                  ",\"rescue_ssid\":\"" + netManager.safeGetString(netManager.rescueApSsid) + "\"" +
-                  ",\"admin_user\":\"" + netManager.safeGetString(netManager.adminUser) + "\"";
+    String json;
+    json.reserve(768);
+    json = "{\"timezone\":";
+    json += String(netManager.timezone);
+    json += ",\"onHour\":";
+    json += String(netManager.onHour);
+    json += ",\"onMin\":";
+    json += String(netManager.onMin);
+    json += ",\"offHour\":";
+    json += String(netManager.offHour);
+    json += ",\"offMin\":";
+    json += String(netManager.offMin);
+    json += ",\"days\":";
+    json += String(netManager.scheduleDays);
+    json += ",\"l_onHour\":";
+    json += String(netManager.lightOnHour);
+    json += ",\"l_onMin\":";
+    json += String(netManager.lightOnMin);
+    json += ",\"l_offHour\":";
+    json += String(netManager.lightOffHour);
+    json += ",\"l_offMin\":";
+    json += String(netManager.lightOffMin);
+    json += ",\"lightScheduleDays\":";
+    json += String(netManager.lightScheduleDays);
+    json += ",\"ssid\":\"";
+    json += netManager.safeGetString(netManager.ssid);
+    json += "\"";
+    json += ",\"password\":\"";
+    json += netManager.safeGetString(netManager.password);
+    json += "\"";
+    json += ",\"ssid2\":\"";
+    json += netManager.safeGetString(netManager.ssid2);
+    json += "\"";
+    json += ",\"pass2\":\"";
+    json += netManager.safeGetString(netManager.pass2);
+    json += "\"";
+    json += ",\"device_id\":\"";
+    json += netManager.deviceId;
+    json += "\"";
+    json += ",\"rescue_ssid\":\"";
+    json += netManager.safeGetString(netManager.rescueApSsid);
+    json += "\"";
+    json += ",\"admin_user\":\"";
+    json += netManager.safeGetString(netManager.adminUser);
+    json += "\"";
 
 #ifndef USE_RAINMAKER
-    json +=       ",\"blynkTemplate\":\"" + maskBlynk(netManager.safeGetString(netManager.blynkTemplate)) + "\"" +
-                  ",\"blynkName\":\"" + maskBlynk(netManager.safeGetString(netManager.blynkName)) + "\"" +
-                  ",\"blynkAuth\":\"" + maskBlynk(netManager.safeGetString(netManager.blynkAuth)) + "\"";
+    json += ",\"blynkTemplate\":\"";
+    json += maskBlynk(netManager.safeGetString(netManager.blynkTemplate));
+    json += "\"";
+    json += ",\"blynkName\":\"";
+    json += maskBlynk(netManager.safeGetString(netManager.blynkName));
+    json += "\"";
+    json += ",\"blynkAuth\":\"";
+    json += maskBlynk(netManager.safeGetString(netManager.blynkAuth));
+    json += "\"";
 #endif
 
-    json +=       ",\"power_box_on\":" + String(controlLogic.isPowerBoxOn() ? "true" : "false") +
-                  ",\"light_on\":" + String(controlLogic.isLightOn() ? "true" : "false") + "}";
+    json += ",\"power_box_on\":";
+    json += (controlLogic.isPowerBoxOn() ? "true" : "false");
+    json += ",\"light_on\":";
+    json += (controlLogic.isLightOn() ? "true" : "false");
+    json += "}";
     request->send(200, "application/json", json);
   });
 
-  // API Lưu WiFi & Cloud (Sẽ reboot sau 3 giây)
+  // API Lưu WiFi / Cloud theo từng nhóm field gửi lên
   server.on("/save_wifi", ASYNC_POST, [](AsyncWebServerRequest *request){
     if (!netManager.checkAuth(request)) return;
 
-    if(request->hasParam("ssid", true) && request->hasParam("password", true)) {
-      String newSSID = request->getParam("ssid", true)->value();
-      String newPass = request->getParam("password", true)->value();
-
-      Preferences p; p.begin("mydoor", false);
-
-      auto saveStringIfChanged = [&p](const char* key, String newValue) {
-          if (p.getString(key, "") != newValue) {
-              p.putString(key, newValue);
-          }
-      };
-
-      saveStringIfChanged("ssid", newSSID);
-      saveStringIfChanged("pass", newPass);
-      if(request->hasParam("ssid2", true)) saveStringIfChanged("ssid2", request->getParam("ssid2", true)->value());
-      if(request->hasParam("pass2", true)) saveStringIfChanged("pass2", request->getParam("pass2", true)->value());
+    bool hasWifiFields = request->hasParam("ssid", true) || request->hasParam("password", true)
+      || request->hasParam("ssid2", true) || request->hasParam("pass2", true);
 
 #ifndef USE_RAINMAKER
-      if(request->hasParam("blynkTemplate", true)) {
-        String newVal = request->getParam("blynkTemplate", true)->value();
-        if (newVal.length() > 0 && newVal.indexOf('*') == -1) saveStringIfChanged("blynkTemplate", newVal);
-      }
-      if(request->hasParam("blynkName", true)) {
-        String newVal = request->getParam("blynkName", true)->value();
-        if (newVal.length() > 0 && newVal.indexOf('*') == -1) saveStringIfChanged("blynkName", newVal);
-      }
-      if(request->hasParam("blynkAuth", true)) {
-        String newVal = request->getParam("blynkAuth", true)->value();
-        if (newVal.length() > 0 && newVal.indexOf('*') == -1) saveStringIfChanged("blynkAuth", newVal);
-      }
+    bool hasCloudFields = request->hasParam("blynkTemplate", true)
+      || request->hasParam("blynkName", true) || request->hasParam("blynkAuth", true);
+#else
+    bool hasCloudFields = false;
 #endif
 
-      p.end();
+    if (!hasWifiFields && !hasCloudFields) {
+      return request->send(400, "text/plain", "Missing args");
+    }
 
-      request->send(200, "text/plain", "OK");
-      netManager.pendingReboot = true;
-      netManager.rebootTime = millis();
-    } else request->send(400, "text/plain", "Missing args");
+    Preferences p;
+    p.begin("mydoor", false);
+
+    auto saveStringIfChanged = [&p](const char* key, const String& newValue) {
+      if (p.getString(key, "") != newValue) {
+        p.putString(key, newValue);
+        return true;
+      }
+      return false;
+    };
+
+    bool wifiChanged = false;
+    bool cloudChanged = false;
+
+    if (hasWifiFields) {
+      String currentSSID = p.getString("ssid", "");
+      String currentPass = p.getString("pass", "");
+      String currentSSID2 = p.getString("ssid2", "");
+      String currentPass2 = p.getString("pass2", "");
+
+      String newSSID = request->hasParam("ssid", true) ? request->getParam("ssid", true)->value() : currentSSID;
+      String newPass = request->hasParam("password", true) ? request->getParam("password", true)->value() : currentPass;
+      String newSSID2 = request->hasParam("ssid2", true) ? request->getParam("ssid2", true)->value() : currentSSID2;
+      String newPass2 = request->hasParam("pass2", true) ? request->getParam("pass2", true)->value() : currentPass2;
+
+      newSSID.trim();
+      newPass.trim();
+      newSSID2.trim();
+      newPass2.trim();
+
+      if (newSSID.length() == 0) {
+        p.end();
+        return request->send(400, "text/plain", "WiFi SSID chinh khong duoc de trong.");
+      }
+
+      if (newPass.length() == 0 && newSSID == currentSSID) {
+        newPass = currentPass;
+      }
+      if (newSSID != currentSSID && newPass.length() == 0) {
+        p.end();
+        return request->send(400, "text/plain", "Doi SSID chinh thi phai nhap mat khau moi.");
+      }
+
+      if (newSSID2.length() == 0) {
+        newPass2 = "";
+      } else if (newPass2.length() == 0 && newSSID2 == currentSSID2) {
+        newPass2 = currentPass2;
+      } else if (newPass2.length() == 0) {
+        p.end();
+        return request->send(400, "text/plain", "Doi SSID phu thi phai nhap mat khau WiFi phu.");
+      }
+
+      if (newSSID2 == newSSID) {
+        p.end();
+        return request->send(400, "text/plain", "WiFi phu khong duoc trung WiFi chinh.");
+      }
+
+      if ((newPass.length() > 0 && newPass.length() < 8) || (newPass2.length() > 0 && newPass2.length() < 8)) {
+        p.end();
+        return request->send(400, "text/plain", "Mat khau WiFi phai tu 8 ky tu tro len.");
+      }
+
+      wifiChanged |= saveStringIfChanged("ssid", newSSID);
+      wifiChanged |= saveStringIfChanged("pass", newPass);
+      wifiChanged |= saveStringIfChanged("ssid2", newSSID2);
+      wifiChanged |= saveStringIfChanged("pass2", newPass2);
+
+      netManager.ssid = newSSID;
+      netManager.password = newPass;
+      netManager.ssid2 = newSSID2;
+      netManager.pass2 = newPass2;
+    }
+
+#ifndef USE_RAINMAKER
+    if (hasCloudFields) {
+      if (request->hasParam("blynkTemplate", true)) {
+        String newVal = request->getParam("blynkTemplate", true)->value();
+        if (newVal.length() > 0 && newVal.indexOf('*') == -1) {
+          cloudChanged |= saveStringIfChanged("blynkTemplate", newVal);
+          netManager.blynkTemplate = newVal;
+        }
+      }
+      if (request->hasParam("blynkName", true)) {
+        String newVal = request->getParam("blynkName", true)->value();
+        if (newVal.length() > 0 && newVal.indexOf('*') == -1) {
+          cloudChanged |= saveStringIfChanged("blynkName", newVal);
+          netManager.blynkName = newVal;
+        }
+      }
+      if (request->hasParam("blynkAuth", true)) {
+        String newVal = request->getParam("blynkAuth", true)->value();
+        if (newVal.length() > 0 && newVal.indexOf('*') == -1) {
+          cloudChanged |= saveStringIfChanged("blynkAuth", newVal);
+          netManager.blynkAuth = newVal;
+          Blynk.disconnect();
+          Blynk.config(newVal.c_str(), "blynk.cloud", 443);
+        }
+      }
+    }
+#endif
+
+    p.end();
+
+    if (wifiChanged) {
+      bool confirmedReboot = request->hasParam("reboot_confirm", true) && request->getParam("reboot_confirm", true)->value() == "1";
+      if (!confirmedReboot) {
+        return request->send(409, "text/plain", "Thay doi WiFi can khoi dong lai thiet bi de ap dung. Ban co dong y reboot ngay khong?");
+      }
+      request->send(200, "text/plain", "OK_REBOOT");
+      netManager.requestControlledReboot("WiFi config updated by user confirm");
+      return;
+    }
+
+    if (cloudChanged) {
+      request->send(200, "text/plain", "OK_CLOUD");
+      return;
+    }
+
+    request->send(200, "text/plain", "NO_CHANGES");
   });
+
 
   // API Lưu Lịch Trình Relay 4
   server.on("/save_schedule", ASYNC_POST, [](AsyncWebServerRequest *request){
@@ -1273,7 +1813,7 @@ void NetworkManager::setupWebServer() {
     if (newPass.length() > 0) {
       p.putString("rescue_pass", newPass);
     }
-    p.putBool("rescue_customized", true);
+    p.putBool("rescue_custom", true);
     p.end();
 
     netManager.safeSetString(netManager.rescueApSsid, newSsid);
@@ -1286,8 +1826,7 @@ void NetworkManager::setupWebServer() {
 #ifndef USE_RAINMAKER
     if (netManager.isApMode) {
 #endif
-      netManager.pendingReboot = true;
-      netManager.rebootTime = millis();
+      netManager.requestControlledReboot("Rescue AP config updated");
 #ifndef USE_RAINMAKER
     }
 #endif
@@ -1297,10 +1836,13 @@ void NetworkManager::setupWebServer() {
   server.on("/reboot", ASYNC_POST, [](AsyncWebServerRequest *request){
     if (!netManager.checkAuth(request)) return;
 
+    if (netManager.isOtaRunning) {
+      return request->send(409, "text/plain", "OTA đang chạy, không thể reboot lúc này.");
+    }
+
     request->send(200, "text/plain", "Rebooting");
     netManager.flushLogsToNvsIfNeeded(true);
-    netManager.pendingReboot = true;
-    netManager.rebootTime = millis();
+    netManager.requestControlledReboot("Web reboot endpoint");
   });
 
   server.on("/ap_mode", ASYNC_POST, [](AsyncWebServerRequest *request){
@@ -1330,16 +1872,13 @@ void NetworkManager::setupWebServer() {
     if(request->hasParam("cmd", true)) {
         String cmd = request->getParam("cmd", true)->value();
         if (cmd == "up") {
-            controlLogic.executeRemoteCommand(CMD_UP);
-            netManager.logEvent("Cua: LEN (WebUI)");
+            netManager.handleRemoteDoorCommand(CMD_UP, "WebUI");
         }
         else if (cmd == "stop") {
-            controlLogic.executeRemoteCommand(CMD_STOP);
-            netManager.logEvent("Cua: DUNG (WebUI)");
+            netManager.handleRemoteDoorCommand(CMD_STOP, "WebUI");
         }
         else if (cmd == "down") {
-            controlLogic.executeRemoteCommand(CMD_DOWN);
-            netManager.logEvent("Cua: XUONG (WebUI)");
+            netManager.handleRemoteDoorCommand(CMD_DOWN, "WebUI");
         }
 
         request->send(200, "text/plain", "OK");
@@ -1390,8 +1929,15 @@ void NetworkManager::setupWebServer() {
     request->send(200, "text/plain", netManager.getRecentLogs());
   });
 
+  // API Health Snapshot cho soak test (auth bắt buộc)
+  server.on("/health", ASYNC_GET, [](AsyncWebServerRequest *request){
+    if (!netManager.checkAuth(request)) return;
+    request->send(200, "application/json", netManager.getHealthSnapshot());
+  });
+
   // API Public read-only logs (không yêu cầu auth)
   server.on("/public_logs", ASYNC_GET, [](AsyncWebServerRequest *request){
+    if (!netManager.checkAuth(request)) return;
     request->send(200, "text/plain", netManager.getPublicLogs());
   });
 
@@ -1413,6 +1959,40 @@ void NetworkManager::setupWebServer() {
 }
 #else
 void NetworkManager::syncOtaAuth() {}
+
+bool NetworkManager::requestControlledReboot(const char* reason) {
+  if (isOtaRunning) {
+      logEvent("[SYSTEM] Reboot blocked while OTA is running.");
+      return false;
+  }
+
+  bool scheduled = false;
+  if (stateMutex != NULL && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100))) {
+      if (!pendingReboot) {
+          pendingReboot = true;
+          rebootTime = millis();
+          scheduled = true;
+      }
+      xSemaphoreGive(stateMutex);
+  } else if (!pendingReboot) {
+      pendingReboot = true;
+      rebootTime = millis();
+      scheduled = true;
+  }
+
+  if (!scheduled) {
+      return false;
+  }
+
+  if (reason != nullptr && reason[0] != '\0') {
+      logEvent(String("[SYSTEM] Controlled reboot requested: ") + reason);
+  } else {
+      logEvent("[SYSTEM] Controlled reboot requested.");
+  }
+
+  return true;
+}
+
 void NetworkManager::setupWebServer() {}
 #endif
 
@@ -1488,7 +2068,17 @@ bool NetworkManager::isLightScheduleActiveNow(int currentMins) {
   }
 }
 
+void NetworkManager::saveManualOverrideState() {
+  Preferences p;
+  p.begin("mydoor", false);
+  p.putBool("power_override", powerOverrideActive);
+  p.putBool("light_override", lightOverrideActive);
+  p.end();
+}
+
 void NetworkManager::updateManualOverridesAtScheduleEdge(bool powerScheduleActiveNow, bool lightScheduleActiveNow) {
+  bool overrideChanged = false;
+
   if (!scheduleStateInitialized) {
       lastPowerScheduleActive = powerScheduleActiveNow;
       lastLightScheduleActive = lightScheduleActiveNow;
@@ -1499,6 +2089,7 @@ void NetworkManager::updateManualOverridesAtScheduleEdge(bool powerScheduleActiv
   if (powerScheduleActiveNow != lastPowerScheduleActive) {
       if (powerOverrideActive) {
           powerOverrideActive = false;
+          overrideChanged = true;
           logEvent("[AUTO] Power override cleared at schedule edge");
       }
       lastPowerScheduleActive = powerScheduleActiveNow;
@@ -1507,15 +2098,32 @@ void NetworkManager::updateManualOverridesAtScheduleEdge(bool powerScheduleActiv
   if (lightScheduleActiveNow != lastLightScheduleActive) {
       if (lightOverrideActive) {
           lightOverrideActive = false;
+          overrideChanged = true;
           logEvent("[AUTO] Light override cleared at schedule edge");
       }
       lastLightScheduleActive = lightScheduleActiveNow;
   }
+
+  if (overrideChanged) {
+      saveManualOverrideState();
+  }
 }
 
 void NetworkManager::applyManualOverrideForPower(bool turnOn, const char* source) {
+  bool overrideChanged = false;
   struct tm timeinfo;
-  if (!getLocalTime(&timeinfo, 100)) return;
+  if (!getLocalTime(&timeinfo, 100)) {
+      if (!powerOverrideActive) {
+          powerOverrideActive = true;
+          overrideChanged = true;
+          logEvent(String("[AUTO] Power override active (NTP pending) (") + source + ")");
+      }
+
+      if (overrideChanged) {
+          saveManualOverrideState();
+      }
+      return;
+  }
 
   int currentMins = timeinfo.tm_hour * 60 + timeinfo.tm_min;
   bool scheduleActiveNow = isScheduleActiveNow(currentMins);
@@ -1523,17 +2131,35 @@ void NetworkManager::applyManualOverrideForPower(bool turnOn, const char* source
   if (turnOn != scheduleActiveNow) {
       if (!powerOverrideActive) {
           powerOverrideActive = true;
+          overrideChanged = true;
           logEvent(String("[AUTO] Power override active until next schedule edge (") + source + ")");
       }
   } else if (powerOverrideActive) {
       powerOverrideActive = false;
+      overrideChanged = true;
       logEvent("[AUTO] Power override cleared (manual aligned with schedule)");
+  }
+
+  if (overrideChanged) {
+      saveManualOverrideState();
   }
 }
 
 void NetworkManager::applyManualOverrideForLight(bool turnOn, const char* source) {
+  bool overrideChanged = false;
   struct tm timeinfo;
-  if (!getLocalTime(&timeinfo, 100)) return;
+  if (!getLocalTime(&timeinfo, 100)) {
+      if (!lightOverrideActive) {
+          lightOverrideActive = true;
+          overrideChanged = true;
+          logEvent(String("[AUTO] Light override active (NTP pending) (") + source + ")");
+      }
+
+      if (overrideChanged) {
+          saveManualOverrideState();
+      }
+      return;
+  }
 
   int currentMins = timeinfo.tm_hour * 60 + timeinfo.tm_min;
   bool scheduleActiveNow = isLightScheduleActiveNow(currentMins);
@@ -1541,11 +2167,17 @@ void NetworkManager::applyManualOverrideForLight(bool turnOn, const char* source
   if (turnOn != scheduleActiveNow) {
       if (!lightOverrideActive) {
           lightOverrideActive = true;
+          overrideChanged = true;
           logEvent(String("[AUTO] Light override active until next schedule edge (") + source + ")");
       }
   } else if (lightOverrideActive) {
       lightOverrideActive = false;
+      overrideChanged = true;
       logEvent("[AUTO] Light override cleared (manual aligned with schedule)");
+  }
+
+  if (overrideChanged) {
+      saveManualOverrideState();
   }
 }
 
@@ -1602,23 +2234,56 @@ void NetworkManager::checkNTP() {
 
 void NetworkManager::pushCloudState() {
 #ifdef USE_BLYNK
-    pushBlynkState();
+    pushBlynkState(true);
 #endif
 #ifdef USE_RAINMAKER
     pushRainMakerState();
 #endif
 }
 
-void NetworkManager::pushBlynkState() {
+void NetworkManager::pushBlynkState(bool force) {
 #ifdef USE_BLYNK
-  if (Blynk.connected()) {
-      Blynk.virtualWrite(VPIN_POWER_BOX, controlLogic.isPowerBoxOn() ? 1 : 0);
-      Blynk.virtualWrite(VPIN_LIGHT, controlLogic.isLightOn() ? 1 : 0);
-      Blynk.virtualWrite(VPIN_LED_BLUE, ledWifiState ? 1 : 0);
-      Blynk.virtualWrite(VPIN_LED_GREEN, ledReadyState ? 1 : 0);
-      Blynk.virtualWrite(VPIN_LED_RED, ledFaultState ? 1 : 0);
-      Blynk.virtualWrite(VPIN_LED_YELLOW, (isApMode || faultLedBlinkState) ? 1 : 0);
+  if (!Blynk.connected()) {
+      cloudStateInitialized = false;
+      return;
   }
+
+  bool powerNow = controlLogic.isPowerBoxOn();
+  bool lightNow = controlLogic.isLightOn();
+  bool blueNow = ledWifiState;
+  bool greenNow = ledReadyState;
+  bool redNow = ledFaultState;
+  bool yellowNow = (isApMode || faultLedBlinkState);
+
+  bool changed = !cloudStateInitialized ||
+                 powerNow != lastPushedPowerState ||
+                 lightNow != lastPushedLightState ||
+                 blueNow != lastPushedBlue ||
+                 greenNow != lastPushedGreen ||
+                 redNow != lastPushedRed ||
+                 yellowNow != lastPushedYellow;
+
+  unsigned long now = millis();
+  bool heartbeatDue = (now - lastBlynkStatePushMs) >= CLOUD_STATE_HEARTBEAT_MS;
+  if (!force && !changed && !heartbeatDue) {
+      return;
+  }
+
+  Blynk.virtualWrite(VPIN_POWER_BOX, powerNow ? 1 : 0);
+  Blynk.virtualWrite(VPIN_LIGHT, lightNow ? 1 : 0);
+  Blynk.virtualWrite(VPIN_LED_BLUE, blueNow ? 1 : 0);
+  Blynk.virtualWrite(VPIN_LED_GREEN, greenNow ? 1 : 0);
+  Blynk.virtualWrite(VPIN_LED_RED, redNow ? 1 : 0);
+  Blynk.virtualWrite(VPIN_LED_YELLOW, yellowNow ? 1 : 0);
+
+  lastPushedPowerState = powerNow;
+  lastPushedLightState = lightNow;
+  lastPushedBlue = blueNow;
+  lastPushedGreen = greenNow;
+  lastPushedRed = redNow;
+  lastPushedYellow = yellowNow;
+  cloudStateInitialized = true;
+  lastBlynkStatePushMs = now;
 #endif
 }
 
@@ -1633,13 +2298,13 @@ BLYNK_DISCONNECTED() {
 }
 
 BLYNK_WRITE(VPIN_DOOR_UP) {
-  if (param.asInt() == 1) netManager.handleRemoteDoorCommand(CMD_UP);
+  if (param.asInt() == 1) netManager.handleRemoteDoorCommand(CMD_UP, "Blynk");
 }
 BLYNK_WRITE(VPIN_DOOR_DOWN) {
-  if (param.asInt() == 1) netManager.handleRemoteDoorCommand(CMD_DOWN);
+  if (param.asInt() == 1) netManager.handleRemoteDoorCommand(CMD_DOWN, "Blynk");
 }
 BLYNK_WRITE(VPIN_DOOR_STOP) {
-  if (param.asInt() == 1) netManager.handleRemoteDoorCommand(CMD_STOP);
+  if (param.asInt() == 1) netManager.handleRemoteDoorCommand(CMD_STOP, "Blynk");
 }
 BLYNK_WRITE(VPIN_POWER_BOX) {
   netManager.handleRemotePowerCommand(param.asInt() == 1);
@@ -1649,21 +2314,31 @@ BLYNK_WRITE(VPIN_LIGHT) {
 }
 #endif
 
-void NetworkManager::handleRemoteDoorCommand(RemoteCommand cmd) {
+void NetworkManager::handleRemoteDoorCommand(RemoteCommand cmd, const char* source) {
 #ifdef USE_BLYNK
-  if (!canAcceptRemoteCommands()) {
+  if (source != nullptr && strcmp(source, "Blynk") == 0 && !canAcceptRemoteCommands()) {
       Serial.println("[BLYNK] Bo qua lenh cua do session cloud vua reconnect hoac chua san sang.");
       return;
   }
-  if (cmd == CMD_UP) logEvent("Cua: LEN (Blynk)");
-  else if (cmd == CMD_DOWN) logEvent("Cua: XUONG (Blynk)");
-  else if (cmd == CMD_STOP) logEvent("Cua: DUNG (Blynk)");
 #endif
+
+  if (!controlLogic.isPowerBoxOn()) {
+      logEvent("Vui long bat nguon de dieu khien cua cuon.");
+      return;
+  }
+
 #ifdef USE_RAINMAKER
-  if (cmd == CMD_UP) rainmakerDoorState = "UP";
-  else if (cmd == CMD_DOWN) rainmakerDoorState = "DOWN";
-  else if (cmd == CMD_STOP) rainmakerDoorState = "STOPPED";
+  if (source != nullptr && strcmp(source, "RainMaker") == 0) {
+      if (cmd == CMD_UP) rainmakerDoorState = "UP";
+      else if (cmd == CMD_DOWN) rainmakerDoorState = "DOWN";
+      else if (cmd == CMD_STOP) rainmakerDoorState = "STOPPED";
+  }
 #endif
+
+  if (cmd == CMD_UP) logEvent(String("Cua: LEN (") + (source ? source : "Remote") + ")");
+  else if (cmd == CMD_DOWN) logEvent(String("Cua: XUONG (") + (source ? source : "Remote") + ")");
+  else if (cmd == CMD_STOP) logEvent(String("Cua: DUNG (") + (source ? source : "Remote") + ")");
+
   controlLogic.executeRemoteCommand(cmd);
 }
 
@@ -1728,6 +2403,8 @@ void NetworkManager::resetBlynkSessionState() {
   blynkRemoteGuardUntil = 0;
   blynkWasConnected = false;
   blynkInvalidToken = false;
+  cloudStateInitialized = false;
+  lastBlynkStatePushMs = 0;
 #endif
 }
 
@@ -1765,6 +2442,7 @@ void NetworkManager::handleBlynk() {
                 BLYNK_CONNECT_TIMEOUT_MS,
                 BLYNK_SSL_HANDSHAKE_TIMEOUT_SEC,
                 blynkReconnectBackoffMs);
+  blynkReconnectAttempts++;
   bool connected = Blynk.connect(BLYNK_CONNECT_TIMEOUT_MS);
   esp_task_wdt_reset();
 
@@ -1783,13 +2461,30 @@ void NetworkManager::handleBlynk() {
       unsigned long nextBackoff = blynkReconnectBackoffMs * 2;
       blynkReconnectBackoffMs = (nextBackoff > BLYNK_RECONNECT_MAX_MS) ? BLYNK_RECONNECT_MAX_MS : nextBackoff;
   }
+
+  blynkReconnectBackoffMs = jitteredDelay(blynkReconnectBackoffMs, BLYNK_RECONNECT_JITTER_MS);
 #endif
 }
 
 void NetworkManager::handleWiFi() {
+  unsigned long now = millis();
+
   if (WiFi.status() == WL_CONNECTED) {
-    isConnected = true;
-    wifiLostFlag = false;
+    bool wasLost = wifiLostFlag;
+
+    if (stateMutex != NULL && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50))) {
+        isConnected = true;
+        xSemaphoreGive(stateMutex);
+    } else {
+        isConnected = true;
+    }
+
+    if (wasLost) {
+        markInternetConnected(now);
+    }
+
+    wifiReconnectBackoffMs = WIFI_TIMEOUT_MS;
+    nextWiFiRetryAt = 0;
 
     if (isApMode && !apManualMode) {
         Serial.println("[WIFI] Co mang tro lai. Dang tat Rescue AP...");
@@ -1798,27 +2493,26 @@ void NetworkManager::handleWiFi() {
     return;
   }
 
-  isConnected = false;
-
-  // LƯU Ý QUAN TRỌNG: Không return ngay khi ở isApMode.
-  // Nếu return ở đây, thiết bị sẽ không bao giờ chạy xuống logic kết nối lại STA ở dưới
-  // và bị kẹt vĩnh viễn ở AP mode nếu mất mạng trên 5 phút.
-
-  if (!wifiLostFlag) {
-      wifiLostFlag = true;
-      wifiLostTime = millis();
+  bool firstLoss = false;
+  if (stateMutex != NULL && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50))) {
+      isConnected = false;
+      firstLoss = !wifiLostFlag;
+      xSemaphoreGive(stateMutex);
+  } else {
+      isConnected = false;
+      firstLoss = !wifiLostFlag;
   }
 
-  if (ssid != "" && millis() - lastWiFiCheck > WIFI_TIMEOUT_MS) {
-    lastWiFiCheck = millis();
+  if (firstLoss) {
+      markInternetDisconnected(now);
+      wifiReconnectBackoffMs = WIFI_TIMEOUT_MS;
+      nextWiFiRetryAt = now;
+  }
 
+  if (ssid != "" && now >= nextWiFiRetryAt) {
     static bool trySecondary = false;
 
-    // Khi vừa bắt đầu giai đoạn mất mạng, luôn thử lại Wi-Fi chính trước
-    if (wifiLostFlag && (millis() - wifiLostTime < 1000)) {
-        trySecondary = false;
-    }
-
+    wifiReconnectAttempts++;
     Serial.println("[WIFI] Mat ket noi, dang thu lai...");
     WiFi.disconnect();
 
@@ -1828,10 +2522,16 @@ void NetworkManager::handleWiFi() {
     } else {
         WiFi.begin(ssid.c_str(), password.c_str());
     }
+
     trySecondary = !trySecondary;
+    nextWiFiRetryAt = now + jitteredDelay(wifiReconnectBackoffMs, WIFI_RECONNECT_JITTER_MS);
+    if (wifiReconnectBackoffMs < WIFI_RECONNECT_MAX_MS) {
+        unsigned long nextBackoff = wifiReconnectBackoffMs * 2;
+        wifiReconnectBackoffMs = (nextBackoff > WIFI_RECONNECT_MAX_MS) ? WIFI_RECONNECT_MAX_MS : nextBackoff;
+    }
   }
 
-  if (wifiLostFlag && !isApMode && (millis() - wifiLostTime >= 300000)) {
+  if (wifiLostFlag && !isApMode && (now - wifiLostTime >= 300000)) {
       Serial.println("[AP] Mat ket noi 5 phut, tu dong bat Rescue AP!");
       requestApEnable(false, "Long WiFi outage");
   }
@@ -1872,13 +2572,35 @@ void NetworkManager::loop() {
       if (!wifiLostFlag) {
           wifiLostFlag = true;
           wifiLostTime = now;
-      } else if (now - wifiLostTime >= RAINMAKER_REPROVISION_MS) {
+          rainmakerReprovisionBackoffMs = RAINMAKER_REPROVISION_MS;
+          nextRainmakerReprovisionAt = now + jitteredDelay(rainmakerReprovisionBackoffMs, RAINMAKER_REPROVISION_JITTER_MS);
+      } else if (now >= nextRainmakerReprovisionAt) {
+          if (!rainmakerInitialized) {
+              logEvent("[RM] Reprovision skipped: init not ready.");
+              nextRainmakerReprovisionAt = now + jitteredDelay(RAINMAKER_REPROVISION_MS, RAINMAKER_REPROVISION_JITTER_MS);
+              return;
+          }
+
+          if (rainmakerProvisioningActive) {
+              nextRainmakerReprovisionAt = now + jitteredDelay(RAINMAKER_REPROVISION_MS, RAINMAKER_REPROVISION_JITTER_MS);
+              return;
+          }
+
+          rainmakerReprovisionAttempts++;
+          rainmakerForceResetProvisioning = true;
           startRainMakerProvisioning();
           logEvent("[RM] Long WiFi outage, restart provisioning.");
+          if (rainmakerReprovisionBackoffMs < RAINMAKER_REPROVISION_MAX_MS) {
+              unsigned long nextBackoff = rainmakerReprovisionBackoffMs * 2;
+              rainmakerReprovisionBackoffMs = (nextBackoff > RAINMAKER_REPROVISION_MAX_MS) ? RAINMAKER_REPROVISION_MAX_MS : nextBackoff;
+          }
+          nextRainmakerReprovisionAt = now + jitteredDelay(rainmakerReprovisionBackoffMs, RAINMAKER_REPROVISION_JITTER_MS);
       }
   } else {
       wifiLostFlag = false;
       wifiLostTime = 0;
+      rainmakerReprovisionBackoffMs = RAINMAKER_REPROVISION_MS;
+      nextRainmakerReprovisionAt = 0;
   }
 #endif
   handleBlynk();
@@ -1895,6 +2617,7 @@ void NetworkManager::loop() {
 
   syncLogsToCloud();
   flushLogsToNvsIfNeeded(false);
+
 
   if (isLockedOut && millis() - lockoutStartTime >= AP_LOCKOUT_MS) {
       isLockedOut = false;
@@ -1913,14 +2636,27 @@ void NetworkManager::loop() {
   }
 #endif
 
-  if (pendingReboot && millis() - rebootTime >= 2000) {
+  bool rebootDue = false;
+  if (stateMutex != NULL && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50))) {
+      rebootDue = pendingReboot && (millis() - rebootTime >= 2000);
+      xSemaphoreGive(stateMutex);
+  } else {
+      rebootDue = pendingReboot && (millis() - rebootTime >= 2000);
+  }
+
+  if (rebootDue) {
       if (now - lastRestartAt >= RESTART_GUARD_MS) {
           lastRestartAt = now;
           flushLogsToNvsIfNeeded(true);
           ESP.restart();
       } else {
           Serial.println("[GUARD] Bo qua reboot de tranh reboot-loop lien tuc.");
-          pendingReboot = false;
+          if (stateMutex != NULL && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50))) {
+              pendingReboot = false;
+              xSemaphoreGive(stateMutex);
+          } else {
+              pendingReboot = false;
+          }
       }
   }
 
